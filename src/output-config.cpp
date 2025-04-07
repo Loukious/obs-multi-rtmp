@@ -28,6 +28,10 @@ static nlohmann::json SaveTarget(OutputTargetConfig& config) {
     json["sync-start"] = config.syncStart;
     json["sync-stop"] = config.syncStop;
     json["enabled"] = config.enabled;
+    json["streamlabs-token"] = config.streamlabsToken;
+    json["streamlabs-title"] = config.streamlabsTitle;
+    json["streamlabs-category"] = config.streamlabsCategory;
+    json["streamlabs-mature-content"] = config.streamlabsMatureContent;
     if (config.videoConfig.has_value())
         json["video-config"] = *config.videoConfig;
     if (config.audioConfig.has_value())
@@ -129,6 +133,10 @@ static OutputTargetConfigPtr LoadTargetConfig(nlohmann::json& json) {
     config->syncStart = GetJsonField<bool>(json, "sync-start").value_or(false);
     config->syncStop = GetJsonField<bool>(json, "sync-stop").value_or(config->syncStart);
     config->enabled = GetJsonField<bool>(json, "enabled").value_or(true);
+    config->streamlabsToken = GetJsonField<bool>(json, "streamlabs-token").value_or(false);
+    config->streamlabsTitle = GetJsonField<std::string>(json, "streamlabs-title").value_or("");
+    config->streamlabsCategory = GetJsonField<std::string>(json, "streamlabs-category").value_or("");
+    config->streamlabsMatureContent = GetJsonField<bool>(json, "streamlabs-mature-content").value_or(false);
     config->serviceParam = GetJsonField<nlohmann::json>(json, "service-param").value_or(nlohmann::json{});
     config->outputParam = GetJsonField<nlohmann::json>(json, "output-param").value_or(nlohmann::json{});
     config->videoConfig = GetJsonField<std::string>(json, "video-config");

@@ -14,6 +14,7 @@
 #include "obs-properties-widget.h"
 #include "helpers.h"
 #include "protocols.h"
+#include <qdesktopservices.h>
 
 static std::optional<int> ParseStringToInt(const QString& str) {
     try {
@@ -254,6 +255,12 @@ class EditTargetPanelImpl: public EditTargetPanel
 
     QCheckBox* syncStart_ = 0;
     QCheckBox* syncStop_ = 0;
+    QCheckBox* streamlabsToken_ = 0;
+    QCheckBox* streamlabsMatureContent_ = 0;
+    QPushButton* streamlabsGetToken_ = 0;
+
+    QLineEdit* streamlabsTitle_ = 0;
+    QLineEdit* streamlabsCategory_ = 0;
 
     std::vector<std::string> EnumEncodersByCodec(const char* codec)
     {
@@ -597,8 +604,28 @@ public:
                     auto otherLayout = new QGridLayout();
                     otherLayout->addWidget(syncStart_ = new QCheckBox(obs_module_text("SyncStart"), gp), 0, 0);
                     otherLayout->addWidget(syncStop_ = new QCheckBox(obs_module_text("SyncStop"), gp), 1, 0);
+                    otherLayout->addWidget(streamlabsToken_ = new QCheckBox(obs_module_text("StreamlabsToken"), gp), 2, 0);
+                    otherLayout->addWidget(streamlabsGetToken_ = new QPushButton(obs_module_text("GetStreamlabsToken"), gp), 3, 0);
+                    QObject::connect(streamlabsGetToken_, &QPushButton::clicked, []() {
+                        QDesktopServices::openUrl(QUrl("https://github.com/Loukious/StreamlabsTikTokStreamKeyGenerator"));
+                    });
                     gp->setLayout(otherLayout);
                 }
+
+                {
+                    auto gp = new QGroupBox(obs_module_text("StreamlabsSettings"), container_);
+                    sub_grid->addWidget(gp, 2, 0, 1, 2);
+                    auto labsLayout = new QGridLayout();
+                    labsLayout->addWidget(new QLabel(obs_module_text("StreamlabsTitle"), gp), 0, 0);
+                    labsLayout->addWidget(streamlabsTitle_ = new QLineEdit("", gp), 0, 1);
+                    labsLayout->addWidget(new QLabel(obs_module_text("StreamlabsCategory"), gp), 1, 0);
+                    labsLayout->addWidget(streamlabsCategory_ = new QLineEdit("", gp), 1, 1);
+                    labsLayout->addWidget(streamlabsMatureContent_ = new QCheckBox(obs_module_text("StreamlabsMatureContent"), gp), 2, 0);
+                    gp->setLayout(labsLayout);
+                    gp->setVisible(false);
+                    QObject::connect(streamlabsToken_, &QCheckBox::toggled, gp, &QGroupBox::setVisible);
+                }
+
             }
             layout->addLayout(sub_grid, 1);
         }
@@ -964,6 +991,10 @@ public:
         config_->protocol = tostdu8(protocolSelector_->itemData(protocolSelector_->currentIndex()).toString());
         config_->syncStart = syncStart_->isChecked();
         config_->syncStop = syncStop_->isChecked();
+        config_->streamlabsToken = streamlabsToken_->isChecked();
+        config_->streamlabsTitle = tostdu8(streamlabsTitle_->text());
+        config_->streamlabsCategory = tostdu8(streamlabsCategory_->text());
+        config_->streamlabsMatureContent = streamlabsMatureContent_->isChecked();
         config_->outputParam = outputSettings_->Save();
         config_->serviceParam = serviceSettings_->Save();
 
@@ -1005,6 +1036,10 @@ public:
         protocolSelector_->setCurrentIndex(protocolIndex);
         syncStart_->setChecked(target.syncStart);
         syncStop_->setChecked(target.syncStop);
+        streamlabsToken_->setChecked(target.streamlabsToken);
+        streamlabsTitle_->setText(QString::fromUtf8(target.streamlabsTitle));
+        streamlabsCategory_->setText(QString::fromUtf8(target.streamlabsCategory));
+        streamlabsMatureContent_->setChecked(target.streamlabsMatureContent);
     }
 
     using IdOrVideoConfig = std::variant<std::string_view, VideoEncoderConfig*>;
