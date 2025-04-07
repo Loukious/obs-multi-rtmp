@@ -46,6 +46,10 @@ struct OutputTargetConfig {
     // settings. Lets a target be temporarily excluded (e.g. a platform
     // that's down) without deleting and re-creating it.
     bool enabled = true;
+    std::string streamlabsTitle;
+    std::string streamlabsCategory;
+    bool streamlabsToken = false;
+    bool streamlabsMatureContent = false;
 
     nlohmann::json serviceParam;
     nlohmann::json outputParam;
