@@ -8,34 +8,6 @@ inputs:
     description: Build configuration
     required: false
     default: RelWithDebInfo
-  codesign:
-    description: Enable codesigning (macOS only)
-    required: false
-    default: 'false'
-  notarize:
-    description: Enable notarization (macOS only)
-    required: false
-    default: 'false'
-  codesignIdent:
-    description: Developer ID for application codesigning (macOS only)
-    required: false
-    default: '-'
-  installerIdent:
-    description: Developer ID for installer package codesigning (macOS only)
-    required: false
-    default: ''
-  codesignTeam:
-    description: Developer team for codesigning (macOS only)
-    required: false
-    default: ''
-  codesignUser:
-    description: Apple ID username for notarization (macOS only)
-    required: false
-    default: ''
-  codesignPass:
-    description: Apple ID password for notarization (macOS only)
-    required: false
-    default: ''
   package:
     description: Create Windows or macOS installation package
     required: false
@@ -51,20 +23,12 @@ runs:
       if: runner.os == 'macOS'
       shell: zsh --no-rcs --errexit --pipefail {0}
       working-directory: ${{ inputs.workingDirectory }}
-      env:
-        CODESIGN_IDENT: ${{ inputs.codesignIdent }}
-        CODESIGN_IDENT_INSTALLER: ${{ inputs.installerIdent }}
-        CODESIGN_TEAM: ${{ inputs.codesignTeam }}
-        CODESIGN_IDENT_USER: ${{ inputs.codesignUser }}
-        CODESIGN_IDENT_PASS: ${{ inputs.codesignPass }}
       run: |
         : Run macOS Packaging
 
         local -a package_args=(--config ${{ inputs.config }})
         if (( ${+RUNNER_DEBUG} )) package_args+=(--debug)
 
-        if [[ '${{ inputs.codesign }}' == 'true' ]] package_args+=(--codesign)
-        if [[ '${{ inputs.notarize }}' == 'true' ]] package_args+=(--notarize)
         if [[ '${{ inputs.package }}' == 'true' ]] package_args+=(--package)
 
         .github/scripts/package-macos ${package_args}
