@@ -33,8 +33,12 @@ struct OutputTargetConfig {
     std::string id;
     std::string name;
     std::string protocol;
+    std::string streamlabsTitle;
+    std::string streamlabsCategory;
     bool syncStart = false;
     bool syncStop = false;
+    bool streamlabsToken = false;
+    bool streamlabsMatureContent = false;
 
     nlohmann::json serviceParam;
     nlohmann::json outputParam;

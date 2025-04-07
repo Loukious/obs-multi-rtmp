@@ -54,6 +54,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   ./src/obs-properties-widget.cpp
   ./src/protocols.h
   ./src/protocols.cpp
+  ./src/streamlabs-api.h
+  ./src/streamlabs-api.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

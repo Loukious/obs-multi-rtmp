@@ -5,6 +5,7 @@
 #include "edit-widget.h"
 #include "output-config.h"
 #include "protocols.h"
+#include "streamlabs-api.h"
 
 #include "obs.hpp"
 
@@ -552,25 +553,7 @@ public:
 
             output_ = obs_output_create(output_id, "multi-output", output_settings, nullptr);
             SetMeAsHandler(output_);
-        }
-
-        if (output_) {
-            isUseDelay_ = false;
-
-            auto profileConfig = obs_frontend_get_profile_config();
-            if (profileConfig) {
-                bool useDelay = config_get_bool(profileConfig, "Output", "DelayEnable");
-                bool preserveDelay = config_get_bool(profileConfig, "Output", "DelayPreserve");
-                int delaySec = config_get_int(profileConfig, "Output", "DelaySec");
-                obs_output_set_delay(output_,
-                    useDelay ? delaySec : 0,
-                    preserveDelay ? OBS_OUTPUT_DELAY_PRESERVE : 0
-                );
-
-                if (useDelay && delaySec > 0)
-                    isUseDelay_ = true;
-            }
-        }
+        }    
 
         if (!PrepareOutputService())
         {
@@ -590,9 +573,67 @@ public:
             return;
         }
 
+
+        if (output_) {
+            isUseDelay_ = false;
+
+            auto profileConfig = obs_frontend_get_profile_config();
+            if (profileConfig) {
+                bool useDelay = config_get_bool(profileConfig, "Output", "DelayEnable");
+                bool preserveDelay = config_get_bool(profileConfig, "Output", "DelayPreserve");
+                int delaySec = config_get_int(profileConfig, "Output", "DelaySec");
+                obs_output_set_delay(output_,
+                    useDelay ? delaySec : 0,
+                    preserveDelay ? OBS_OUTPUT_DELAY_PRESERVE : 0
+                );
+
+                if (useDelay && delaySec > 0)
+                    isUseDelay_ = true;
+            }
+            if (config_->streamlabsToken) {
+                obs_service_t *service = obs_output_get_service(output_);
+                obs_data_t *servSettings = obs_service_get_settings(service);
+                bool use_auth = obs_data_get_bool(servSettings, "use_auth");
+                const char *pass = obs_data_get_string(servSettings, "password");
+
+                if (use_auth) {
+                    if (pass && strlen(pass) > 0) {
+                        std::string token = pass;
+                        auto [success, errorMessage, newServer, newKey] = StreamlabsAPI::StartStream(token, config_->streamlabsTitle, StreamlabsAPI::CategorySearch(token, config_->streamlabsCategory), config_->streamlabsMatureContent ? 1 : 0);
+                        if (success) {
+                            // Update the service with the new server and key
+                            obs_service_t* service = obs_output_get_service(output_);
+                            if (service) {
+                                obs_data_t* servSettings = obs_service_get_settings(service);
+                                if (servSettings) {
+                                    obs_data_set_string(servSettings, "key", newKey.c_str());
+                                    obs_data_set_string(servSettings, "server", newServer.c_str());
+                                    obs_service_update(service, servSettings);
+                                    obs_data_release(servSettings);
+                                }
+                            }
+                        } else {
+                            SetMsg(QString::fromStdString(errorMessage));
+                            return;
+                        }
+        
+
+
+                    } else {
+                        SetMsg(obs_module_text("Error.StreamlabsToken"));
+                        return;
+                    }
+                }
+                obs_data_release(servSettings);
+
+            }
+
+        }
+
         if (!obs_output_start(output_))
         {
             SetMsg(obs_module_text("Error.StartOutput"));
+            return;
         }
     }
 
@@ -616,6 +657,22 @@ public:
             obs_output_stop(output_);
         else
             obs_output_force_stop(output_);
+        
+        if (config_->streamlabsToken) {
+            obs_service_t *service = obs_output_get_service(output_);
+            obs_data_t *servSettings = obs_service_get_settings(service);
+            bool use_auth = obs_data_get_bool(servSettings, "use_auth");
+            const char *pass = obs_data_get_string(servSettings, "password");
+            const char *key = obs_data_get_string(servSettings, "key");
+
+            if (use_auth) {
+                if (pass && strlen(pass) > 0) {
+                    std::string token = pass;
+                    StreamlabsAPI::EndStream(token, StreamlabsAPI::ExtractStreamId(key));
+                }
+            }
+            obs_data_release(servSettings);
+        }
     }
    
     void OnOBSEvent(obs_frontend_event ev) override
