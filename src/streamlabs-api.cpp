@@ -1,4 +1,6 @@
 #include "streamlabs-api.h"
+#include <vector>
+#include <algorithm>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -172,6 +174,32 @@ std::tuple<bool, std::string, std::string, std::string> StreamlabsAPI::StartStre
     return {success, errorMessage, newServer, newKey};
 }
 
+static int levenshteinDistance(const std::string& s1, const std::string& s2) {
+    const int m = static_cast<int>(s1.size());
+    const int n = static_cast<int>(s2.size());
+    if (m == 0) return n;
+    if (n == 0) return m;
+
+    std::vector<int> costs(n + 1);
+    for (int i = 0; i <= n; ++i) {
+        costs[i] = i;
+    }
+
+    for (int i = 0; i < m; ++i) {
+        costs[0] = i + 1;
+        int corner = i;
+        for (int j = 0; j < n; ++j) {
+            int upper = costs[j + 1];
+            costs[j + 1] = std::min({
+                costs[j] + 1,
+                upper + 1,
+                corner + (s1[static_cast<size_t>(i)] == s2[static_cast<size_t>(j)] ? 0 : 1)
+            });
+            corner = upper;
+        }
+    }
+    return costs[n];
+}
 
 std::string StreamlabsAPI::CategorySearch(const std::string& token, const std::string& category) {
     if (category.empty()) {
@@ -250,21 +278,80 @@ std::string StreamlabsAPI::CategorySearch(const std::string& token, const std::s
         return "";
     }
 
-    QJsonValue firstCategoryValue = categories.at(0);
-    if (!firstCategoryValue.isObject()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: First category is not an object");
+    std::string originalLower = category;
+    std::transform(originalLower.begin(), originalLower.end(), originalLower.begin(), ::tolower);
+
+    QJsonObject bestMatch;
+    bool exactMatchFound = false;
+
+    for (const QJsonValue& val : categories) {
+        if (!val.isObject()) {
+            continue;
+        }
+        QJsonObject obj = val.toObject();
+        if (!obj.contains("full_name")) {
+            continue;
+        }
+        QJsonValue nameVal = obj.value("full_name");
+        if (!nameVal.isString()) {
+            continue;
+        }
+        std::string fullName = nameVal.toString().toStdString();
+        std::string fullNameLower = fullName;
+        std::transform(fullNameLower.begin(), fullNameLower.end(), fullNameLower.begin(), ::tolower);
+
+        if (fullNameLower == originalLower) {
+            bestMatch = obj;
+            exactMatchFound = true;
+            break;
+        }
+    }
+
+    if (!exactMatchFound) {
+        int minDistance = INT_MAX;
+        for (const QJsonValue& val : categories) {
+            if (!val.isObject()) {
+                continue;
+            }
+            QJsonObject obj = val.toObject();
+            if (!obj.contains("full_name")) {
+                continue;
+            }
+            QJsonValue nameVal = obj.value("full_name");
+            if (!nameVal.isString()) {
+                continue;
+            }
+            std::string fullName = nameVal.toString().toStdString();
+            std::string fullNameLower = fullName;
+            std::transform(fullNameLower.begin(), fullNameLower.end(), fullNameLower.begin(), ::tolower);
+
+            int distance = levenshteinDistance(originalLower, fullNameLower);
+            if (distance < minDistance) {
+                minDistance = distance;
+                bestMatch = obj;
+            } else if (distance == minDistance) {
+                std::string currentBestName = bestMatch["full_name"].toString().toStdString();
+                std::string candidateName = obj["full_name"].toString().toStdString();
+                if (candidateName.length() > currentBestName.length()) {
+                    bestMatch = obj;
+                }
+            }
+        }
+    }
+
+    if (bestMatch.isEmpty()) {
+        blog(LOG_WARNING, TAG "CategorySearch failed: No valid category match found for '%s'", category.c_str());
         return "";
     }
 
-    QJsonObject first_category = firstCategoryValue.toObject();
-    if (!first_category.contains("game_mask_id")) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: Category object missing 'game_mask_id'");
+    if (!bestMatch.contains("game_mask_id")) {
+        blog(LOG_WARNING, TAG "CategorySearch failed: Best match category missing 'game_mask_id'");
         return "";
     }
 
-    QJsonValue gameMaskIdValue = first_category.value("game_mask_id");
+    QJsonValue gameMaskIdValue = bestMatch.value("game_mask_id");
     if (!gameMaskIdValue.isString()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: 'game_mask_id' is not a string");
+        blog(LOG_WARNING, TAG "CategorySearch failed: 'game_mask_id' is not a string in best match");
         return "";
     }
 
