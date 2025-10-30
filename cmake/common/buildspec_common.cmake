@@ -67,7 +67,7 @@ function(_setup_obs_studio)
     COMMAND
       "${CMAKE_COMMAND}" -S "${dependencies_dir}/${_obs_destination}" -B
       "${dependencies_dir}/${_obs_destination}/build_${arch}" -G ${_cmake_generator} "${_cmake_arch}"
-      -DOBS_CMAKE_VERSION:STRING=3.0.0 -DENABLE_PLUGINS:BOOL=OFF -DENABLE_UI:BOOL=OFF
+      -DOBS_CMAKE_VERSION:STRING=3.0.0 -DENABLE_PLUGINS:BOOL=OFF -DENABLE_FRONTEND:BOOL=OFF
       -DOBS_VERSION_OVERRIDE:STRING=${_obs_version} "-DCMAKE_PREFIX_PATH='${CMAKE_PREFIX_PATH}'" ${_is_fresh}
       ${_cmake_extra}
     RESULT_VARIABLE _process_result
@@ -199,6 +199,19 @@ function(_check_dependencies)
       file(MAKE_DIRECTORY "${dependencies_dir}/${destination}")
       if(dependency STREQUAL obs-studio)
         file(ARCHIVE_EXTRACT INPUT "${dependencies_dir}/${file}" DESTINATION "${dependencies_dir}")
+
+        # Patch OBS Studio CMakeLists.txt to enable Swift language for macOS
+        if(OS_MACOS)
+          set(obs_cmake_file "${dependencies_dir}/${destination}/CMakeLists.txt")
+          if(EXISTS "${obs_cmake_file}")
+            file(READ "${obs_cmake_file}" obs_cmake_content)
+            string(REGEX REPLACE
+              "(project\\(obs-studio VERSION [^)]+\\))"
+              "\\1\n\nif(APPLE)\n  enable_language(Swift)\nendif()"
+              obs_cmake_content "${obs_cmake_content}")
+            file(WRITE "${obs_cmake_file}" "${obs_cmake_content}")
+          endif()
+        endif()
       else()
         file(ARCHIVE_EXTRACT INPUT "${dependencies_dir}/${file}" DESTINATION "${dependencies_dir}/${destination}")
       endif()

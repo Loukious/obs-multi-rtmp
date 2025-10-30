@@ -52,23 +52,19 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   ./src/json-util.hpp
   ./src/output-config.h
   ./src/output-config.cpp
-  ./src/output-config-legacy.cpp
   ./src/obs-properties-widget.h
   ./src/obs-properties-widget.cpp
   ./src/protocols.h
   ./src/protocols.cpp
+  ./src/helpers.h
+  ./src/helpers.cpp
   ./src/streamlabs-api.h
   ./src/streamlabs-api.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
   ./dep/nlohmann-json
-  .deps/obs-studio-30.0.0/libobs
+  .deps/obs-studio-31.0.0/libobs
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
-
-if (WIN32)
-  install(FILES archive-readme.txt DESTINATION . RENAME Readme.txt)
-  install(FILES archive-copybat.txt DESTINATION . RENAME Copy-Into-Here-To-Install.bat)
-endif ()

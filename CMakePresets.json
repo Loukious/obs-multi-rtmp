@@ -19,7 +19,7 @@
     {
       "name": "macos",
       "displayName": "macOS Universal",
-      "description": "Build for macOS 11.0+ (Universal binary)",
+      "description": "Build for macOS 12.0+ (Universal binary)",
       "inherits": ["template"],
       "binaryDir": "${sourceDir}/build_macos",
       "condition": {
@@ -30,8 +30,7 @@
       "generator": "Xcode",
       "warnings": {"dev": true, "deprecated": true},
       "cacheVariables": {
-        "QT_VERSION": "6",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
         "CODESIGN_IDENTITY": "$penv{CODESIGN_IDENT}",
         "CODESIGN_TEAM": "$penv{CODESIGN_TEAM}"
@@ -41,7 +40,7 @@
       "name": "macos-ci",
       "inherits": ["macos"],
       "displayName": "macOS Universal CI build",
-      "description": "Build for macOS 11.0+ (Universal binary) for CI",
+      "description": "Build for macOS 12.0+ (Universal binary) for CI",
       "generator": "Xcode",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": false,
@@ -65,7 +64,7 @@
       "cacheVariables": {
         "QT_VERSION": "6",
         "CMAKE_SYSTEM_VERSION": "10.0.18363.657",
-        "CMAKE_INSTALL_PREFIX": "rundir",
+        "CMAKE_INSTALL_PREFIX": "C:/ProgramData/obs-studio/plugins",
         "CMAKE_COMPILE_WARNING_AS_ERROR": false
       }
     },
@@ -84,6 +83,24 @@
       "description": "Build for Ubuntu x86_64",
       "inherits": ["template"],
       "binaryDir": "${sourceDir}/build_x86_64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "generator": "Ninja",
+      "warnings": {"dev": true, "deprecated": true},
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_LIBDIR": "lib/CMAKE_SYSTEM_PROCESSOR-linux-gnu"
+      }
+    },
+    {
+      "name": "ubuntu-aarch64",
+      "displayName": "Ubuntu arm64",
+      "description": "Build for Ubuntu arm64",
+      "inherits": ["template"],
+      "binaryDir": "${sourceDir}/build_aarch64",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -142,6 +159,13 @@
       "configurePreset": "ubuntu-x86_64",
       "displayName": "Ubuntu x86_64",
       "description": "Ubuntu build for x86_64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "ubuntu-aarch64",
+      "configurePreset": "ubuntu-aarch64",
+      "displayName": "Ubuntu arm64",
+      "description": "Ubuntu build for arm64",
       "configuration": "RelWithDebInfo"
     },
     {
