@@ -21,7 +21,13 @@ find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
 find_package(CURL REQUIRED)
-find_package(qrcodegencpp CONFIG REQUIRED)
+find_package(qrcodegencpp CONFIG QUIET)
+if(NOT TARGET qrcodegencpp::qrcodegencpp)
+  # Linux distributions and the Flatpak SDK provide pkg-config metadata.
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(QRCODEGENCPP REQUIRED IMPORTED_TARGET qrcodegencpp)
+  add_library(qrcodegencpp::qrcodegencpp ALIAS PkgConfig::QRCODEGENCPP)
+endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE CURL::libcurl)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE qrcodegencpp::qrcodegencpp)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NOMINMAX)
@@ -76,6 +82,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   ./src/tiktok-live-session.cpp
   ./src/push-widget.h
   ./src/push-widget.cpp
+  src/shared-scene-view.h
   ./src/json-util.hpp
   ./src/output-config.h
   ./src/output-config.cpp
