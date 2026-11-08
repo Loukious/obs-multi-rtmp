@@ -231,7 +231,7 @@ QByteArray studio_user_agent(const QString &version)
 	return QByteArray("Mozilla/") + studio_browser_version(version).toUtf8();
 }
 
-Headers common_headers(const QString &version)
+Headers common_headers(const QString &)
 {
 	return {{"Accept", "application/json, text/plain, */*"},
 		{"Accept-Language", "en-US"}, {"Sec-CH-UA", "\"Not.A/Brand\";v=\"99\", \"Chromium\";v=\"136\""},
