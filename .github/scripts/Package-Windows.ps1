@@ -48,6 +48,14 @@ function Package {
     $ProductVersion = $BuildSpec.version
 
     $OutputName = "${ProductName}-${ProductVersion}-windows-${Target}"
+    $InstallerSource = Join-Path -Path $ProjectRoot -ChildPath "release/${Configuration}/${ProductName}"
+    if (!(Test-Path -LiteralPath "${InstallerSource}/${ProductName}.dll" -PathType Leaf)) {
+        throw "Modern plugin module is missing from ${InstallerSource}"
+    }
+    $InstallerSource = (Resolve-Path -LiteralPath $InstallerSource).ProviderPath
+    if (Test-Path -LiteralPath "${InstallerSource}/bin") {
+        throw "Stale legacy bin directory in staging. Use a clean install directory before packaging."
+    }
 
     $RemoveArgs = @{
         ErrorAction = 'SilentlyContinue'
@@ -90,20 +98,23 @@ function Package {
             }
         }
     }
-    AddDirectory "obs-plugins/64bit" "${ProjectRoot}/release/${Configuration}/${ProductName}/bin/64bit"
-    AddDirectory "data/obs-plugins/${ProductName}" "${ProjectRoot}/release/${Configuration}/${ProductName}/data"
+    # Extract into %ProgramData%/obs-studio/plugins, or the plugins directory
+    # in a portable OBS 33+ installation. The installer uses this same tree.
+    AddDirectory "${ProductName}" $InstallerSource
+    $zipf.Dispose()
+
+    # OBS 32 does not search the new layout. Keep its archive explicitly
+    # separate so the standard ZIP never installs a legacy module.
+    $zipf = New-Object System.IO.Compression.ZipArchive -ArgumentList ([System.IO.File]::OpenWrite("${ProjectRoot}/release/${OutputName}-OBS32.zip"), [System.IO.Compression.ZipArchiveMode]::Create)
+    foreach ($ModuleFile in (Get-ChildItem -LiteralPath $InstallerSource -File)) {
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zipf, $ModuleFile.FullName,
+            "${ProductName}/bin/64bit/$($ModuleFile.Name)", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+    AddDirectory "${ProductName}/data" "${InstallerSource}/data"
     $zipf.Dispose()
     Log-Group
 
     $NsiFile = "${ProjectRoot}/installer.nsi"
-    $InstallerSource = Join-Path -Path $ProjectRoot -ChildPath "release/${Configuration}/${ProductName}"
-
-    if ( ! ( Test-Path -LiteralPath $InstallerSource -PathType Container ) ) {
-        throw "Installer source directory does not exist: ${InstallerSource}"
-    }
-
-    $InstallerSource = (Resolve-Path -LiteralPath $InstallerSource).ProviderPath
-
     Log-Information 'Creating NSIS installer...'
 
     Push-Location -Stack BuildTemp
@@ -111,6 +122,9 @@ function Package {
     Invoke-External "makensis.exe" "/DPLUGIN_SOURCE_DIR=${InstallerSource}" ${NsiFile}
     Copy-Item -Path "${ProjectRoot}/obs-multi-rtmp-setup.exe" -Destination "${OutputName}-Installer.exe"
     Pop-Location -Stack BuildTemp
+
+    & "${ProjectRoot}/tests/windows-package-test.ps1" -PackageDirectory "${ProjectRoot}/release"
+    & "${ProjectRoot}/tests/windows-installer-migration-test.ps1"
 
     Log-Group
 }

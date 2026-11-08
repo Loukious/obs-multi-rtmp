@@ -5,17 +5,18 @@
 !endif
 
 Unicode true
-RequestExecutionLevel user
+RequestExecutionLevel admin
 
 SetDatablockOptimize on
 SetCompress auto
 SetCompressor /SOLID lzma
 
 Name "obs-multi-rtmp"
-Caption "Multiple RTMP Output Plugin for OBS Studio"
+Caption "Multiple RTMP Output Plugin for OBS Studio 33+"
 Icon "${NSISDIR}\Contrib\Graphics\Icons\win-install.ico"
 
 Var /Global DefInstDir
+!include ".github\scripts\windows-legacy-cleanup.nsh"
 Function .onInit
     ReadEnvStr $0 "ALLUSERSPROFILE"
     StrCpy $DefInstDir "$0\obs-studio\plugins"
@@ -45,6 +46,16 @@ Page instfiles
 
 Section
 SetOutPath "$INSTDIR"
+ClearErrors
 File /r "${PLUGIN_SOURCE_DIR}"
+IfErrors install_failed
+Call RemoveDetectedLegacyCopies
+StrCmp $LegacyCleanupFailed 1 0 install_done
+MessageBox MB_OK|MB_ICONEXCLAMATION "The new plugin is installed, but an old copy could not be removed. Close all OBS instances and run this installer again."
+Goto install_done
+install_failed:
+MessageBox MB_OK|MB_ICONSTOP "Installation failed. Existing legacy copies were kept. Close OBS and run the installer again."
+SetErrorLevel 1
+install_done:
 SectionEnd
 
