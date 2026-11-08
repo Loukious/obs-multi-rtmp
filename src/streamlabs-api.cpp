@@ -1,4 +1,6 @@
 #include "streamlabs-api.h"
+#include "streamlabs-info.h"
+#include "tiktok-native/request_cancellation.hpp"
 #include <vector>
 #include <algorithm>
 #include <QJsonDocument>
@@ -11,6 +13,7 @@ size_t StreamlabsAPI::WriteCallback(void* contents, size_t size, size_t nmemb, v
 {
     size_t totalBytes = size * nmemb;
     std::string* buf = static_cast<std::string*>(userp);
+    if (totalBytes > 8 * 1024 * 1024 || buf->size() > 8 * 1024 * 1024 - totalBytes) return 0;
     buf->append(static_cast<char*>(contents), totalBytes);
     return totalBytes;
 }
@@ -51,6 +54,8 @@ bool StreamlabsAPI::EndStream(const std::string &token, const std::string &strea
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 20000L);
 
     struct curl_slist* headers = nullptr;
     {
@@ -102,6 +107,9 @@ std::tuple<bool, std::string, std::string, std::string> StreamlabsAPI::StartStre
     }
     
     curl_easy_setopt(curl, CURLOPT_URL, "https://streamlabs.com/api/v5/slobs/tiktok/stream/start");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 25000L);
+    set_tiktok_request_cancellation(curl);
     
     struct curl_slist* headers = nullptr;
     std::string authHeader = "Authorization: Bearer " + token;
@@ -149,19 +157,8 @@ std::tuple<bool, std::string, std::string, std::string> StreamlabsAPI::StartStre
             newKey = responseObj["key"].toString().toStdString();
             success = true;
         } else {
-            if (responseObj.contains("data")) {
-                QJsonObject dataObj = responseObj["data"].toObject();
-                if (dataObj.contains("message")) {
-                    blog(LOG_INFO, "Streamlabs API detailed error: %s", 
-                        dataObj["message"].toString().toStdString().c_str());
-                }
-            }
-            
-            if (responseObj.contains("message")) {
-                errorMessage = responseObj["message"].toString().toStdString();
-            } else {
-                errorMessage = "Unknown error occurred";
-            }
+            errorMessage = StreamlabsApiError(responseObj).toStdString();
+            blog(LOG_WARNING, TAG "Streamlabs API error: %s", errorMessage.c_str());
         }
     } else {
         errorMessage = curl_easy_strerror(res);
@@ -174,186 +171,16 @@ std::tuple<bool, std::string, std::string, std::string> StreamlabsAPI::StartStre
     return {success, errorMessage, newServer, newKey};
 }
 
-static int levenshteinDistance(const std::string& s1, const std::string& s2) {
-    const int m = static_cast<int>(s1.size());
-    const int n = static_cast<int>(s2.size());
-    if (m == 0) return n;
-    if (n == 0) return m;
-
-    std::vector<int> costs(n + 1);
-    for (int i = 0; i <= n; ++i) {
-        costs[i] = i;
-    }
-
-    for (int i = 0; i < m; ++i) {
-        costs[0] = i + 1;
-        int corner = i;
-        for (int j = 0; j < n; ++j) {
-            int upper = costs[j + 1];
-            costs[j + 1] = std::min({
-                costs[j] + 1,
-                upper + 1,
-                corner + (s1[static_cast<size_t>(i)] == s2[static_cast<size_t>(j)] ? 0 : 1)
-            });
-            corner = upper;
-        }
-    }
-    return costs[n];
-}
-
-std::string StreamlabsAPI::CategorySearch(const std::string& token, const std::string& category) {
-    if (category.empty()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: Empty category input");
-        return "";
-    }
-
-    std::string truncated_category = category.substr(0, 25);
-    
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: Could not initialize cURL");
-        return "";
-    }
-
-    char* escaped = curl_easy_escape(curl, truncated_category.c_str(), static_cast<int>(truncated_category.length()));
-    if (!escaped) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: URL escaping failed for category '%s'", truncated_category.c_str());
-        curl_easy_cleanup(curl);
-        return "";
-    }
-    
-    std::string url = "https://streamlabs.com/api/v5/slobs/tiktok/info?category=" + std::string(escaped);
-    curl_free(escaped);
-    
-    std::string response_data;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
-    
-    struct curl_slist* headers = nullptr;
-    std::string authHeader = "Authorization: Bearer " + token;
-    headers = curl_slist_append(headers, authHeader.c_str());
-    headers = curl_slist_append(headers, 
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "StreamlabsDesktop/1.17.0 Chrome/122.0.6261.156 "
-        "Electron/29.3.1 Safari/537.36"
-    );
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    
-    if (res != CURLE_OK) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: cURL request failed with error: %s", curl_easy_strerror(res));
-        curl_easy_cleanup(curl);
-        return "";
-    }
-
-    curl_easy_cleanup(curl);
-
-    QJsonParseError parseError;
-    QJsonDocument doc = QJsonDocument::fromJson(QByteArray(response_data.c_str(), static_cast<int>(response_data.size())), &parseError);
-    if (doc.isNull() || parseError.error != QJsonParseError::NoError) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: JSON parse error at offset %d: %s", 
-             parseError.offset, parseError.errorString().toUtf8().constData());
-        return "";
-    }
-
-    QJsonObject root = doc.object();
-    if (!root.contains("categories")) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: Response missing 'categories' field");
-        return "";
-    }
-
-    QJsonValue categoriesValue = root.value("categories");
-    if (!categoriesValue.isArray()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: 'categories' field is not an array");
-        return "";
-    }
-
-    QJsonArray categories = categoriesValue.toArray();
-    if (categories.isEmpty()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: No categories found for '%s'", truncated_category.c_str());
-        return "";
-    }
-
-    std::string originalLower = category;
-    std::transform(originalLower.begin(), originalLower.end(), originalLower.begin(), ::tolower);
-
-    QJsonObject bestMatch;
-    bool exactMatchFound = false;
-
-    for (const QJsonValue& val : categories) {
-        if (!val.isObject()) {
-            continue;
-        }
-        QJsonObject obj = val.toObject();
-        if (!obj.contains("full_name")) {
-            continue;
-        }
-        QJsonValue nameVal = obj.value("full_name");
-        if (!nameVal.isString()) {
-            continue;
-        }
-        std::string fullName = nameVal.toString().toStdString();
-        std::string fullNameLower = fullName;
-        std::transform(fullNameLower.begin(), fullNameLower.end(), fullNameLower.begin(), ::tolower);
-
-        if (fullNameLower == originalLower) {
-            bestMatch = obj;
-            exactMatchFound = true;
-            break;
-        }
-    }
-
-    if (!exactMatchFound) {
-        int minDistance = INT_MAX;
-        for (const QJsonValue& val : categories) {
-            if (!val.isObject()) {
-                continue;
-            }
-            QJsonObject obj = val.toObject();
-            if (!obj.contains("full_name")) {
-                continue;
-            }
-            QJsonValue nameVal = obj.value("full_name");
-            if (!nameVal.isString()) {
-                continue;
-            }
-            std::string fullName = nameVal.toString().toStdString();
-            std::string fullNameLower = fullName;
-            std::transform(fullNameLower.begin(), fullNameLower.end(), fullNameLower.begin(), ::tolower);
-
-            int distance = levenshteinDistance(originalLower, fullNameLower);
-            if (distance < minDistance) {
-                minDistance = distance;
-                bestMatch = obj;
-            } else if (distance == minDistance) {
-                std::string currentBestName = bestMatch["full_name"].toString().toStdString();
-                std::string candidateName = obj["full_name"].toString().toStdString();
-                if (candidateName.length() > currentBestName.length()) {
-                    bestMatch = obj;
-                }
-            }
-        }
-    }
-
-    if (bestMatch.isEmpty()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: No valid category match found for '%s'", category.c_str());
-        return "";
-    }
-
-    if (!bestMatch.contains("game_mask_id")) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: Best match category missing 'game_mask_id'");
-        return "";
-    }
-
-    QJsonValue gameMaskIdValue = bestMatch.value("game_mask_id");
-    if (!gameMaskIdValue.isString()) {
-        blog(LOG_WARNING, TAG "CategorySearch failed: 'game_mask_id' is not a string in best match");
-        return "";
-    }
-
-    return gameMaskIdValue.toString().toStdString();
+std::string StreamlabsAPI::CategorySearch(const std::string& token, const std::string& category)
+{
+    if (category.empty() || category == "Other") return "";
+    const std::atomic_bool cancelled{false};
+    const auto result = SearchStreamlabsCategories(token, QString::fromStdString(category), cancelled);
+    if (result.errorKey) return "";
+    // Legacy configurations store only the full category name. Match that
+    // exact name as the original app does; new selections use their saved ID.
+    for (const auto &entry : result.categories)
+        if (entry.name.compare(QString::fromStdString(category), Qt::CaseInsensitive) == 0)
+            return entry.id.toStdString();
+    return "";
 }

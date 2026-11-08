@@ -20,6 +20,7 @@ EditTargetPanel* createEditTargetPanel(
     std::function<void()> onContentSizeChanged,
     QWidget* parent = 0,
     const GlobalEditSnapshot* snapshot = nullptr);
+bool EditLayoutEncoder(QWidget* parent, const std::string& id, nlohmann::json& params, int& bitrate, bool audio);
 
 class EditOutputWidget : virtual public QDialog {
 public:
