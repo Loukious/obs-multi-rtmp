@@ -3,6 +3,7 @@
 #include "dual-output-session.h"
 #include "dual-layout-widget.h"
 #include "layout-scene.h"
+#include "shared-scene-view.h"
 #include "edit-widget.h"
 #include "connection-settings.h"
 #include "connection-login.h"
@@ -73,7 +74,7 @@ static QByteArray Json(const QJsonObject& value) { return QJsonDocument(value).t
 static const char* Name(void*) { return "Local test"; }
 
 struct CaptureStats {
-    std::atomic_int videos{0}, audios{0}, peak{0}, center{0}, corner{0};
+    std::atomic_int videos{0}, audios{0}, peak{0}, center{0}, corner{0}, bottomRight{0};
     std::atomic_bool signedSize{false}, firstIndex{false};
     void Reset() { videos = 0; audios = 0; peak = 0; center = 0; corner = 0; signedSize = false; firstIndex = false; }
 };
@@ -121,6 +122,7 @@ static void RegisterCaptureCodecs() {
         const auto w = obs_encoder_get_width(e.encoder), h = obs_encoder_get_height(e.encoder);
         auto& s = stats[w < h ? 0 : 1];
         s.center = frame->data[0][h/2 * frame->linesize[0] + w/2]; s.corner = frame->data[0][0];
+        s.bottomRight = frame->data[0][(h - 10) * frame->linesize[0] + w - 10];
         packet->data = e.bytes.data(); packet->size = e.bytes.size();
         packet->pts = packet->dts = frame->pts; packet->type = OBS_ENCODER_VIDEO; packet->keyframe = true;
         *received = true; return true;
@@ -871,6 +873,79 @@ static void PrimaryFixtures(const QString& cookiePath, obs_scene_t* portrait, ob
     std::cout << "PASS: primary native canvases, OBS lifecycle, single/dual transport, Apply/Cancel and provider switching\n";
 }
 
+static void SingleSceneFixture() {
+    obs_output_info capture{}; capture.id = "scene_view_capture";
+    capture.flags = OBS_OUTPUT_VIDEO | OBS_OUTPUT_ENCODED;
+    capture.get_name = Name; capture.encoded_video_codecs = "h264";
+    capture.create = [](obs_data_t*, obs_output_t* output) -> void* { return output; };
+    capture.destroy = [](void*) {};
+    capture.start = [](void* p) {
+        auto output = static_cast<obs_output_t*>(p);
+        return obs_output_initialize_encoders(output, 0) && obs_output_begin_data_capture(output, 0);
+    };
+    capture.stop = [](void* p, uint64_t) { obs_output_signal_stop(static_cast<obs_output_t*>(p), OBS_OUTPUT_SUCCESS); };
+    capture.encoded_packet = [](void*, encoder_packet* packet) { if (packet) ++stats[0].videos; };
+    obs_register_output(&capture);
+    // Issue #4: a custom-sized Aitum scene must not be rendered through the
+    // landscape main canvas before scaling to the requested portrait output.
+    obs_video_info info{}; Check(obs_get_video_info(&info), "Main video info");
+    info.base_width = info.output_width = 180;
+    info.base_height = info.output_height = 320;
+    OBSCanvasAutoRelease canvas = obs_canvas_create_private("Portrait fixture", &info, 0);
+    Check(canvas != nullptr, "Portrait canvas creation");
+    for (bool legacy : {true, false}) {
+        OBSSceneAutoRelease scene = legacy ? obs_scene_create_private("Aitum-style scene")
+            : obs_canvas_scene_create(canvas, "Native portrait scene");
+        auto source = obs_scene_get_source(scene);
+        if (legacy) {
+            OBSDataAutoRelease settings = obs_source_get_settings(source);
+            obs_data_set_bool(settings, "custom_size", true);
+            obs_data_set_int(settings, "cx", 180); obs_data_set_int(settings, "cy", 320);
+            obs_source_load2(source);
+        }
+        Check(obs_source_get_width(source) == 180 && obs_source_get_height(source) == 320,
+            "Scene exposes its portrait dimensions");
+        OBSDataAutoRelease settings = obs_data_create(); obs_data_set_int(settings, "color", 0xffffffff);
+        OBSSourceAutoRelease white = obs_source_create_private("test_color", "Full-frame white", settings);
+        auto item = obs_scene_add(scene, white);
+        vec2 scale{180.f / 320, 320.f / 180}; obs_sceneitem_set_scale(item, &scale);
+        OBSEncoderAutoRelease encoder = obs_video_encoder_create("test_h264", "Single portrait", nullptr, nullptr);
+        obs_encoder_set_scaled_size(encoder, 90, 160);
+        auto view = GetSharedSceneViewManager().Acquire(encoder, source);
+        Check(bool(view), "Single output scene view");
+        auto shared = GetSharedSceneViewManager().Acquire(encoder, source);
+        Check(shared == view, "Outputs sharing an encoder retain the same scene view");
+        view.reset();
+        Check(obs_encoder_get_width(encoder) == 90 && obs_encoder_get_height(encoder) == 160,
+            "Explicit encoder resolution is preserved");
+        OBSOutputAutoRelease output = obs_output_create("scene_view_capture", "Portrait pixels", nullptr, nullptr);
+        obs_output_set_video_encoder(output, encoder);
+        stats[0].Reset();
+        Check(obs_output_start(output), "Start single scene encoder");
+        Until([] { return stats[0].videos >= 5; });
+        OBSSceneAutoRelease other = obs_scene_create_private("Landscape switch");
+        Check(!GetSharedSceneViewManager().Acquire(encoder, obs_scene_get_source(other)),
+            "Cannot resize a scene view used by a live shared encoder");
+        Check(GetSharedSceneViewManager().Acquire(encoder, source) == shared,
+            "Live shared encoder keeps its original portrait view");
+        obs_output_force_stop(output);
+        Until([&] { return !obs_output_active(output); });
+        Check(stats[0].corner > 220 && stats[0].center > 220 && stats[0].bottomRight > 220,
+            "Portrait scene fills the frame without clipping or blank columns");
+        Check(video_output_get_width(shared->Video()) == 180 && video_output_get_height(shared->Video()) == 320,
+            "Single view uses scene dimensions, not the main canvas");
+        auto switched = GetSharedSceneViewManager().Acquire(encoder, obs_scene_get_source(other));
+        Check(switched == shared && video_output_get_width(switched->Video()) == 320
+            && video_output_get_height(switched->Video()) == 180,
+            "Stopped shared encoder rebuilds its view when scene dimensions change");
+        switched.reset();
+        shared.reset();
+        if (!legacy) obs_canvas_scene_remove(scene);
+    }
+    obs_canvas_remove(canvas);
+    std::cout << "PASS: single-output portrait pixels, native/custom scene sizes and shared view lifetime\n";
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     try {
@@ -891,6 +966,7 @@ int main(int argc, char** argv) {
         Check(obs_reset_video(&video) == OBS_VIDEO_SUCCESS, "D3D11 video initialization");
         obs_audio_info audio{48000, SPEAKERS_STEREO}; Check(obs_reset_audio(&audio), "Audio initialization");
         RegisterSources(); RegisterCaptureCodecs(); RegisterTransport(); RegisterPrimaryTikTokOutput(); InstallHttpFixture();
+        SingleSceneFixture();
         {
             OBSSceneAutoRelease portrait = obs_scene_create("Portrait selection");
             OBSSceneAutoRelease landscape = obs_scene_create("Landscape selection");

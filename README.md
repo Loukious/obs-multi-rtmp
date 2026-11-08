@@ -1,6 +1,8 @@
 ## OBS-Multi-RTMP
 This fork of [OBS-Multi-RTMP](https://github.com/sorayuki/obs-multi-rtmp) adds TikTok Streamlabs and native TikTok LIVE Studio / Android connections.
 
+Requires OBS Studio 32.2.1 or newer.
+
 ## TikTok features
 
 - **Primary or additional streams:** use TikTok through OBS's normal streaming controls or add independent destinations in the Multiple output dock.
@@ -8,6 +10,7 @@ This fork of [OBS-Multi-RTMP](https://github.com/sorayuki/obs-multi-rtmp) adds T
 - **QR login:** scan and confirm on your phone. Expired codes renew automatically, and temporary connection failures retry while keeping the code visible.
 - **Named cookie exports:** successful QR logins save `cookies_<username>.json`. Repeat logins add a suffix to preserve existing files, and exported JSON works with both LIVE Studio and Mobile.
 - **Portrait and landscape together:** eligible LIVE Studio and Android Camera LIVE accounts can stream dual layouts with independent scenes, resolutions, encoders, and optional separate audio tracks.
+- **Vertical scene rendering:** single dock outputs render selected Aitum custom-sized scenes and OBS canvas scenes at their own dimensions before applying the encoder resolution.
 - **LIVE controls:** topic selection, searchable games, gifts, comments, and content disclosure settings for native TikTok connections.
 - **Account and session feedback:** Streamlabs eligibility, native dual-layout eligibility, RapidAPI quota, and detailed provider errors.
 - **LIVE violations and appeals:** automatic notifications while streaming, manual violation checks, and account-verified appeal submission where supported.

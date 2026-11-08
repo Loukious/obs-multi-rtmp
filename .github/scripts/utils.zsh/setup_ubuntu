@@ -39,7 +39,7 @@ if (( ! (${skips[(Ie)all]} + ${skips[(Ie)deps]}) )) {
   read -r dist_version <<< "$(source /etc/os-release; print "${VERSION_ID}")"
 
   # Ubuntu 26.04 splits the OBS development files out of obs-studio.
-  local -a obs_packages=(build-essential libgles2-mesa-dev libsimde-dev obs-studio)
+  local -a obs_packages=(build-essential libgles2-mesa-dev libsimde-dev libcurl4-openssl-dev libssl-dev libqrcodegencpp-dev obs-studio)
   if is-at-least 26.04 ${dist_version}; then
     obs_packages+=(libobs-dev)
   else
