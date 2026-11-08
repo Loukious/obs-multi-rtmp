@@ -24,7 +24,9 @@ bool EnsureLayoutCanvasVideo(obs_canvas_t* canvas, const LayoutVideoConfig& conf
         }
     }
     obs_video_info current{};
-    if (!obs_canvas_get_video_info(canvas, &current) || current.output_width != config.width || current.output_height != config.height) {
+    if (!obs_canvas_get_video_info(canvas, &current)
+        || current.output_width != static_cast<uint32_t>(config.width)
+        || current.output_height != static_cast<uint32_t>(config.height)) {
         *error = obs_module_text("Primary.InvalidCanvas"); return false;
     }
     return true;
