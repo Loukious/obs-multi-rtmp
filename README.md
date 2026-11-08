@@ -3,6 +3,16 @@ This fork of [OBS-Multi-RTMP](https://github.com/sorayuki/obs-multi-rtmp) adds T
 
 Requires OBS Studio 32.2.1 or newer.
 
+## Windows installation
+
+For **OBS 33 or newer**, close OBS and run **Installer.exe**. It installs the DLL directly in `%ProgramData%\obs-studio\plugins\obs-multi-rtmp`, beside the `data` folder. After successful installation, it removes this plugin's old ProgramData `bin\64bit` copy and detects legacy copies in registered OBS installations and the default Program Files locations. Other plugins, profiles and cookie files are preserved. If an old file is locked, the installer asks you to close OBS and retry. This uses OBS's new plugin layout and avoids the **Legacy** indicator.
+
+For manual installation, extract the standard Windows ZIP into `%ProgramData%\obs-studio\plugins`. For **portable OBS 33+**, extract it into the `plugins` folder at the root of the portable OBS installation instead. The resulting path must be `plugins\obs-multi-rtmp\obs-multi-rtmp.dll`.
+
+For **OBS 32.2.1**, use the **OBS32.zip** compatibility archive and extract it into `%ProgramData%\obs-studio\plugins`. It retains the older `obs-multi-rtmp\bin\64bit` layout required by OBS 32. For portable OBS 32, copy that archive's `bin\64bit` contents to OBS's `obs-plugins\64bit` folder, and its `data` contents to `data\obs-plugins\obs-multi-rtmp`.
+
+When upgrading to OBS 33+, use the standard installer or ZIP. OBS prioritizes the new layout over legacy copies. If you previously installed manually inside the OBS application folder, remove only `obs-multi-rtmp.dll`/`.pdb` from `obs-plugins\64bit` and this plugin's `data\obs-plugins\obs-multi-rtmp` folder after closing OBS. Your profile settings and cookie files are stored separately. See [OBS's plugin layout guide](https://obsproject.com/kb/legacy-plugin-developer-info).
+
 ## TikTok features
 
 - **Primary or additional streams:** use TikTok through OBS's normal streaming controls or add independent destinations in the Multiple output dock.

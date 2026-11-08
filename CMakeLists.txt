@@ -177,6 +177,8 @@ if(ENABLE_CONNECTION_TESTS)
     # Loaded only by an isolated portable OBS smoke-test installation.
     add_library(primary-frontend-smoke MODULE tests/primary-frontend-smoke.cpp)
     target_link_libraries(primary-frontend-smoke PRIVATE Qt6::Widgets OBS::libobs OBS::obs-frontend-api)
+    add_library(windows-loader-smoke MODULE tests/windows-loader-smoke.cpp)
+    target_link_libraries(windows-loader-smoke PRIVATE Qt6::Widgets OBS::libobs OBS::obs-frontend-api)
     add_executable(dual-output-test tests/dual-output-test.cpp
       src/tiktok-safety.cpp
       src/rapidapi-quota-widget.cpp
