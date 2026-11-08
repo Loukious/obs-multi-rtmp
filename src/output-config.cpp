@@ -18,6 +18,36 @@ MultiOutputConfig& GlobalMultiOutputConfig()
 }
 
 
+static nlohmann::json SaveLayoutAudio(const LayoutAudioConfig& c) {
+    return {{"encoder", c.encoderId}, {"mixer", c.mixer}, {"bitrate", c.bitrate}, {"param", c.encoderParams}};
+}
+static nlohmann::json SaveLayoutVideo(const LayoutVideoConfig& c) {
+    return {{"scene-uuid", c.sceneUuid}, {"scene-name", c.sceneName}, {"encoder", c.encoderId},
+        {"width", c.width}, {"height", c.height}, {"bitrate", c.bitrate}, {"crop", c.crop}, {"audio", SaveLayoutAudio(c.audio)},
+        {"fps-divisor", c.fpsDivisor}, {"param", c.encoderParams}, {"canvas-uuid", c.canvasUuid}};
+}
+static void LoadLayoutAudio(nlohmann::json j, LayoutAudioConfig& c) {
+    c.encoderId = GetJsonField<std::string>(j, "encoder").value_or(c.encoderId);
+    c.mixer = GetJsonField<int>(j, "mixer").value_or(c.mixer);
+    c.encoderParams = GetJsonField<nlohmann::json>(j, "param").value_or(nlohmann::json::object());
+    if (!c.encoderParams.is_object()) c.encoderParams = nlohmann::json::object();
+    c.bitrate = GetJsonField<int>(j, "bitrate").value_or(c.bitrate);
+}
+static void LoadLayoutVideo(nlohmann::json j, LayoutVideoConfig& c) {
+    c.canvasUuid = GetJsonField<std::string>(j, "canvas-uuid").value_or("");
+    c.sceneUuid = GetJsonField<std::string>(j, "scene-uuid").value_or("");
+    c.sceneName = GetJsonField<std::string>(j, "scene-name").value_or("");
+    c.encoderId = GetJsonField<std::string>(j, "encoder").value_or(c.encoderId);
+    c.width = GetJsonField<int>(j, "width").value_or(c.width);
+    c.height = GetJsonField<int>(j, "height").value_or(c.height);
+    c.bitrate = GetJsonField<int>(j, "bitrate").value_or(c.bitrate);
+    c.crop = GetJsonField<bool>(j, "crop").value_or(c.crop);
+    c.fpsDivisor = GetJsonField<int>(j, "fps-divisor").value_or(1);
+    c.encoderParams = GetJsonField<nlohmann::json>(j, "param").value_or(nlohmann::json::object());
+    if (!c.encoderParams.is_object()) c.encoderParams = nlohmann::json::object();
+    LoadLayoutAudio(GetJsonField<nlohmann::json>(j, "audio").value_or(nlohmann::json::object()), c.audio);
+}
+
 static nlohmann::json SaveTarget(OutputTargetConfig& config) {
     nlohmann::json json;
     json["id"] = config.id;
@@ -28,9 +58,32 @@ static nlohmann::json SaveTarget(OutputTargetConfig& config) {
     json["sync-start"] = config.syncStart;
     json["sync-stop"] = config.syncStop;
     json["enabled"] = config.enabled;
-    json["streamlabs-token"] = config.streamlabsToken;
+    const char* method = "custom";
+    if (config.connectionMethod == ConnectionMethod::Streamlabs)
+        method = "streamlabs";
+    else if (config.connectionMethod == ConnectionMethod::TikTokLiveStudio)
+        method = "tiktok-live-studio";
+    json["connection-method"] = method;
+    json["streamlabs-access-token"] = config.streamlabsAccessToken;
+    json["rapidapi-key"] = config.rapidApiKey;
+    json["cookie-file-path"] = config.cookieFilePath;
+    json["tiktok-client"] = config.tiktokClient;
+    json["tiktok-device-profiles"] = config.tiktokDeviceProfiles;
+    json["tiktok-topic-id"] = config.tiktokTopicId;
+    json["tiktok-game-id"] = config.tiktokGameId;
+    json["tiktok-game-name"] = config.tiktokGameName;
+    json["tiktok-allow-gifts"] = config.tiktokLiveSettings.allowGifts;
+    json["tiktok-monitor-violations"] = config.monitorTikTokViolations;
+    json["tiktok-allow-comments"] = config.tiktokLiveSettings.allowComments;
+    json["tiktok-content-disclosure"] = config.tiktokLiveSettings.contentDisclosure;
+    json["dual-layout"] = {{"enabled", config.dualLayout.enabled}, {"same-audio", config.dualLayout.sameAudio},
+        {"independent-audio-initialized", config.dualLayout.independentAudioInitialized},
+        {"shared-audio", SaveLayoutAudio(config.dualLayout.sharedAudio)},
+        {"portrait", SaveLayoutVideo(config.dualLayout.portrait)}, {"landscape", SaveLayoutVideo(config.dualLayout.landscape)}};
     json["streamlabs-title"] = config.streamlabsTitle;
     json["streamlabs-category"] = config.streamlabsCategory;
+    if (config.streamlabsCategoryId.has_value())
+        json["streamlabs-category-id"] = *config.streamlabsCategoryId;
     json["streamlabs-mature-content"] = config.streamlabsMatureContent;
     if (config.videoConfig.has_value())
         json["video-config"] = *config.videoConfig;
@@ -133,11 +186,50 @@ static OutputTargetConfigPtr LoadTargetConfig(nlohmann::json& json) {
     config->syncStart = GetJsonField<bool>(json, "sync-start").value_or(false);
     config->syncStop = GetJsonField<bool>(json, "sync-stop").value_or(config->syncStart);
     config->enabled = GetJsonField<bool>(json, "enabled").value_or(true);
-    config->streamlabsToken = GetJsonField<bool>(json, "streamlabs-token").value_or(false);
+    const auto method = GetJsonField<std::string>(json, "connection-method");
+    const bool legacyStreamlabs = !method && GetJsonField<bool>(json, "streamlabs-token").value_or(false);
+    if (method == "streamlabs" || legacyStreamlabs)
+        config->connectionMethod = ConnectionMethod::Streamlabs;
+    else if (method == "tiktok-live-studio")
+        config->connectionMethod = ConnectionMethod::TikTokLiveStudio;
+    config->streamlabsAccessToken = GetJsonField<std::string>(json, "streamlabs-access-token").value_or("");
+    config->rapidApiKey = GetJsonField<std::string>(json, "rapidapi-key").value_or("");
+    config->cookieFilePath = GetJsonField<std::string>(json, "cookie-file-path").value_or("");
+    config->tiktokClient = GetJsonField<std::string>(json, "tiktok-client").value_or("pc");
+    if (config->tiktokClient != "mobile")
+        config->tiktokClient = "pc";
+    config->tiktokDeviceProfiles = GetJsonField<nlohmann::json>(json, "tiktok-device-profiles").value_or(nlohmann::json::object());
+    config->tiktokTopicId = GetJsonField<std::string>(json, "tiktok-topic-id").value_or("");
+    config->tiktokGameId = GetJsonField<std::string>(json, "tiktok-game-id").value_or("");
+    config->tiktokGameName = GetJsonField<std::string>(json, "tiktok-game-name").value_or("");
+    config->tiktokLiveSettings.allowGifts = GetJsonField<bool>(json, "tiktok-allow-gifts").value_or(true);
+    config->monitorTikTokViolations = GetJsonField<bool>(json, "tiktok-monitor-violations").value_or(true);
+    config->tiktokLiveSettings.allowComments = GetJsonField<bool>(json, "tiktok-allow-comments").value_or(true);
+    config->tiktokLiveSettings.contentDisclosure = GetJsonField<std::string>(json, "tiktok-content-disclosure").value_or("off");
+    if (!config->tiktokLiveSettings.Valid()) config->tiktokLiveSettings.contentDisclosure = "off";
+    auto dual = GetJsonField<nlohmann::json>(json, "dual-layout").value_or(nlohmann::json::object());
+    config->dualLayout.enabled = GetJsonField<bool>(dual, "enabled").value_or(false);
+    config->dualLayout.sameAudio = GetJsonField<bool>(dual, "same-audio").value_or(true);
+    config->dualLayout.independentAudioInitialized = GetJsonField<bool>(dual, "independent-audio-initialized").value_or(false);
+    LoadLayoutAudio(GetJsonField<nlohmann::json>(dual, "shared-audio").value_or(nlohmann::json::object()), config->dualLayout.sharedAudio);
+    LoadLayoutVideo(GetJsonField<nlohmann::json>(dual, "portrait").value_or(nlohmann::json::object()), config->dualLayout.portrait);
+    LoadLayoutVideo(GetJsonField<nlohmann::json>(dual, "landscape").value_or(nlohmann::json::object()), config->dualLayout.landscape);
+    if (!config->tiktokDeviceProfiles.is_object())
+        config->tiktokDeviceProfiles = nlohmann::json::object();
     config->streamlabsTitle = GetJsonField<std::string>(json, "streamlabs-title").value_or("");
     config->streamlabsCategory = GetJsonField<std::string>(json, "streamlabs-category").value_or("");
+    config->streamlabsCategoryId = GetJsonField<std::string>(json, "streamlabs-category-id");
     config->streamlabsMatureContent = GetJsonField<bool>(json, "streamlabs-mature-content").value_or(false);
     config->serviceParam = GetJsonField<nlohmann::json>(json, "service-param").value_or(nlohmann::json{});
+    if (legacyStreamlabs) {
+        if (config->streamlabsAccessToken.empty())
+            config->streamlabsAccessToken = GetJsonField<std::string>(config->serviceParam, "password").value_or("");
+        // This password was an API token, not RTMP authentication.
+        if (config->serviceParam.is_object()) {
+            config->serviceParam.erase("password");
+            config->serviceParam["use_auth"] = false;
+        }
+    }
     config->outputParam = GetJsonField<nlohmann::json>(json, "output-param").value_or(nlohmann::json{});
     config->videoConfig = GetJsonField<std::string>(json, "video-config");
     config->audioConfig = GetJsonField<std::string>(json, "audio-config");

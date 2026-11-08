@@ -1,0 +1,16 @@
+Native TikTok integration
+
+Sources: https://github.com/Smile-4-Me/tiktok-live-obs
+Revision: 3d7e7e9ec77b0260b2dde4af726d3b15c5a4d933
+Copyright (C) 2026 TikTok Live OBS Contributors
+License: GPL-3.0-only (see tiktok-live-obs-GPL-3.0.txt)
+
+The files under src/tiktok-native and tests/media-signing-test.cpp reuse
+the request signer, frame signer, SEI encoder, desktop device registration,
+cookie/session handling, room lifecycle, topic catalogue, and game-list parser
+from that project.
+
+Local modifications add Android requests, synchronous room operations,
+cookie-file import, OBS locale integration, and native output lifecycle
+management in src/tiktok-live-session.*. No Python or external media proxy
+is used. The original repository's LICENSE is retained unchanged.

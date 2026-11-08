@@ -1,5 +1,7 @@
 #include "edit-widget.h"
 #include "output-config.h"
+#include "connection-settings.h"
+#include "layout-scene.h"
 #include "json-util.hpp"
 #include "obs.hpp"
 #include <QMenu>
@@ -13,7 +15,9 @@
 #include "obs-properties-widget.h"
 #include "helpers.h"
 #include "protocols.h"
-#include <qdesktopservices.h>
+#include "dual-layout-widget.h"
+#include <QDialogButtonBox>
+#include <QMessageBox>
 
 static std::optional<int> ParseStringToInt(const QString& str) {
     try {
@@ -62,6 +66,30 @@ static obs_properties* AddBF(obs_properties* p) {
     return p;
 }
 
+bool EditLayoutEncoder(QWidget* parent, const std::string& id, nlohmann::json& params, int& bitrate, bool audio)
+{
+    OBSPropertiesPtr properties(obs_get_encoder_properties(id.c_str()), obs_properties_destroy);
+    if (!properties) { QMessageBox::warning(parent, obs_module_text("Encoder"), obs_module_text("Dual.Error.Encoder")); return false; }
+    OBSDataAutoRelease settings = obs_encoder_defaults(id.c_str());
+    if (!settings) settings = obs_data_create();
+    if (!audio) { obs_data_set_string(settings, "rate_control", "CBR"); obs_data_set_int(settings, "keyint_sec", 2); }
+    OBSData saved = from_json(params); obs_data_apply(settings, saved); obs_data_set_int(settings, "bitrate", bitrate);
+    QDialog dialog(parent); dialog.setWindowTitle(obs_encoder_get_display_name(id.c_str()));
+    auto layout = new QVBoxLayout(&dialog);
+    auto scroll = new QScrollArea(&dialog); scroll->setWidgetResizable(true);
+    obs_data_addref(settings);
+    auto widget = createPropertyWidget(properties, settings, scroll);
+    scroll->setWidget(widget); layout->addWidget(scroll);
+    auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.resize(620, 580);
+    if (dialog.exec() != QDialog::Accepted) return false;
+    widget->Save(); params = to_json(settings); bitrate = static_cast<int>(obs_data_get_int(settings, "bitrate"));
+    return true;
+}
+
 class EditOutputWidgetImpl: public EditOutputWidget
 {
     class ContentSizeTabWidget: public QTabWidget {
@@ -74,6 +102,21 @@ class EditOutputWidgetImpl: public EditOutputWidget
 
         QSize minimumSizeHint() const override {
             return CalculateTabSize([](QWidget* widget) { return widget->minimumSizeHint(); });
+        }
+
+        bool hasHeightForWidth() const override {
+            return currentWidget() && currentWidget()->hasHeightForWidth();
+        }
+
+        int heightForWidth(int width) const override {
+            const int frame = style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, this) * 2;
+            const int barWidth = tabPosition() == West || tabPosition() == East ? tabBar()->sizeHint().width() : 0;
+            return CalculateTabSize([=](QWidget* widget) {
+                auto hint = widget->sizeHint();
+                if (widget->hasHeightForWidth())
+                    hint.setHeight(widget->heightForWidth((std::max)(0, width - frame - barWidth)));
+                return hint;
+            }).height();
         }
 
     private:
@@ -137,7 +180,7 @@ class EditOutputWidgetImpl: public EditOutputWidget
                 return QScrollArea::viewportSizeHint();
 
             if (auto contentLayout = content->layout()) {
-                auto hint = contentLayout->sizeHint();
+                auto hint = contentLayout->totalSizeHint();
                 if (hint.isValid())
                     return hint;
             }
@@ -159,6 +202,9 @@ class EditOutputWidgetImpl: public EditOutputWidget
 
     QLineEdit* name_ = 0;
     bool resizeToContentPending_ = false;
+    bool initialSizeApplied_ = false;
+    QGroupBox *singleVideo_ = nullptr, *singleAudio_ = nullptr;
+    QWidget *videoPage_ = nullptr, *audioPage_ = nullptr;
 
     class PropertiesWidget: public QWidget {
     public:
@@ -233,6 +279,8 @@ class EditOutputWidgetImpl: public EditOutputWidget
     PropertiesWidget* audioEncoderSettings_;
    
     QComboBox* protocolSelector_ = 0;
+    QLabel* protocolLabel_ = nullptr;
+    ConnectionSettingsWidget* connectionSettings_ = nullptr;
     QComboBox* venc_ = 0;
     QComboBox* v_scene_ = 0;
     QLineEdit* v_resolution_ = 0;
@@ -246,12 +294,6 @@ class EditOutputWidgetImpl: public EditOutputWidget
 
     QCheckBox* syncStart_ = 0;
     QCheckBox* syncStop_ = 0;
-    QCheckBox* streamlabsToken_ = 0;
-    QCheckBox* streamlabsMatureContent_ = 0;
-    QPushButton* streamlabsGetToken_ = 0;
-
-    QLineEdit* streamlabsTitle_ = 0;
-    QLineEdit* streamlabsCategory_ = 0;
 
     std::vector<std::string> EnumEncodersByCodec(const char* codec)
     {
@@ -365,13 +407,17 @@ class EditOutputWidgetImpl: public EditOutputWidget
     void RefreshContentGeometry() {
         layout()->activate();
         if (outputSettingsTabs_) {
-            outputSettingsTabs_->adjustSize();
+            // Ignore hidden pages when the stack computes its minimum size;
+            // this dialog sizes itself to the current tab.
+            for (int i = 0; i < outputSettingsTabs_->count(); ++i) {
+                auto page = outputSettingsTabs_->widget(i);
+                const auto policy = i == outputSettingsTabs_->currentIndex() ? QSizePolicy::Preferred : QSizePolicy::Ignored;
+                page->setSizePolicy(policy, policy);
+            }
             outputSettingsTabs_->updateGeometry();
         }
         container_->layout()->activate();
-        container_->adjustSize();
         container_->updateGeometry();
-        scroll_->adjustSize();
         scroll_->updateGeometry();
     }
 
@@ -389,13 +435,11 @@ class EditOutputWidgetImpl: public EditOutputWidget
     }
 
     void ApplyAutoDialogSize() {
-        auto targetSize = sizeHint();
-        if (!targetSize.isValid())
-            return;
-
-        auto maxSize = CalculateMaximumDialogSize();
-        setMaximumSize(maxSize);
-        resize(targetSize.boundedTo(maxSize).expandedTo(minimumSizeHint()));
+        // Pick a useful starting size once; subsequent edits and tab changes
+        // must not undo the size chosen by the user.
+        if (initialSizeApplied_ || !isVisible()) return;
+        initialSizeApplied_ = true;
+        resize(sizeHint().expandedTo(QSize(980, 720)).boundedTo(CalculateMaximumDialogSize()));
     }
 
     void ScheduleResizeToContent() {
@@ -430,8 +474,26 @@ protected:
         {
             serviceSettings_ = new PropertiesWidget([this]() { ScheduleResizeToContent(); }, tab);
             updateServiceTab();
-            tab->addTab(serviceSettings_, obs_module_text("Tab.Service"));
+            connectionSettings_ = new ConnectionSettingsWidget(serviceSettings_, tab);
+            connectionSettings_->SetContentChangedCallback([this] {
+                if (singleVideo_) singleVideo_->setVisible(!connectionSettings_->UsesDualLayout());
+                if (singleAudio_) singleAudio_->setVisible(!connectionSettings_->UsesDualLayout());
+                ScheduleResizeToContent();
+            });
+            connectionSettings_->SetLayoutPreview([this](const LayoutVideoConfig& config) { ShowLayoutPreview(config, this); });
+            connectionSettings_->LayoutSettings()->editEncoder = [this](const std::string& id, nlohmann::json& params, int& bitrate, bool audio) {
+                return EditLayoutEncoder(this, id, params, bitrate, audio);
+            };
+            tab->addTab(connectionSettings_, obs_module_text("Tab.Service"));
         }
+
+        videoPage_ = new QWidget(tab); audioPage_ = new QWidget(tab);
+        videoPage_->setObjectName("videoSettingsPage"); audioPage_->setObjectName("audioSettingsPage");
+        for (auto page : {videoPage_, audioPage_}) { auto layout = new QVBoxLayout(page); layout->setAlignment(Qt::AlignTop); }
+        videoPage_->layout()->addWidget(connectionSettings_->LayoutSettings()->VideoSettings());
+        audioPage_->layout()->addWidget(connectionSettings_->LayoutSettings()->AudioSettings());
+        tab->addTab(videoPage_, obs_module_text("VideoSettings"));
+        tab->addTab(audioPage_, obs_module_text("AudioSettings"));
 
         // output
         {
@@ -451,6 +513,7 @@ protected:
 
     void updateServiceTab()
     {
+        // Keep the custom form intact while a TikTok method is selected.
         auto protocol_info = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
         assert(protocol_info);
         if (!protocol_info) {
@@ -471,7 +534,7 @@ protected:
 
     void updateOutputTab()
     {
-        auto protocol_info = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
+        auto protocol_info = GetProtocolInfos()->GetInfo(config_->OutputProtocol());
         assert(protocol_info);
         if (!protocol_info) {
         	blog(LOG_ERROR, TAG "Invalid protocol \"%s\", maybe broken config file.", config_->protocol.c_str());
@@ -511,18 +574,19 @@ public:
         config_ = std::make_shared<OutputTargetConfig>(*config_);
 
         setWindowTitle(obs_module_text("StreamingSettings"));
+        setSizeGripEnabled(true);
 
         scroll_ = new ContentSizeScrollArea(this);
+        scroll_->setObjectName("outputEditorScroll");
         scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAsNeeded);
         scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAsNeeded);
         scroll_->setSizePolicy(QSizePolicy::Policy::Preferred, QSizePolicy::Policy::Preferred);
         scroll_->setSizeAdjustPolicy(QScrollArea::SizeAdjustPolicy::AdjustToContents);
 
         container_ = new QWidget(scroll_);
-        container_->setSizePolicy(QSizePolicy::Policy::Preferred, QSizePolicy::Policy::Preferred);
+        container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
         auto layout = new QVBoxLayout(container_);
-        layout->setAlignment(Qt::AlignTop);
 
         int currow = 0;
         {
@@ -531,7 +595,7 @@ public:
             sublayout->setColumnStretch(1, 1);
             sublayout->addWidget(new QLabel(obs_module_text("StreamingName"), container_), 0, 0);
             sublayout->addWidget(name_ = new QLineEdit("", container_), 0, 1);
-            sublayout->addWidget(new QLabel(obs_module_text("Protocol"), container_), 1, 0);
+            sublayout->addWidget(protocolLabel_ = new QLabel(obs_module_text("Protocol"), container_), 1, 0);
             sublayout->addWidget(protocolSelector_ = new QComboBox(container_), 1, 1);
             layout->addLayout(sublayout);
         }
@@ -539,17 +603,14 @@ public:
 
         {
             auto w = CreateOutputSettingsWidget(container_);
-            layout->addWidget(w);
+            layout->addWidget(w, 1);
         }
         ++currow;
         {
-            auto sub_grid = new QGridLayout();
-            sub_grid->setColumnStretch(0, 1);
-            sub_grid->setColumnStretch(1, 0);
             {
                 {
-                    auto gp = new QGroupBox(obs_module_text("VideoSettings"), container_);
-                    sub_grid->addWidget(gp, 0, 0, 2, 1);
+                    auto gp = singleVideo_ = new QGroupBox(obs_module_text("VideoSettings"), container_);
+                    gp->setObjectName("singleVideoSettings"); videoPage_->layout()->addWidget(gp);
                     auto encLayout = new QGridLayout();
                     int currow = 0;
                     {
@@ -600,9 +661,12 @@ public:
                 }
 
                 {
-                    auto gp = new QGroupBox(obs_module_text("AudioSettings"), container_);
-                    sub_grid->addWidget(gp, 0, 1, 1, 1);
+                    auto gp = singleAudio_ = new QGroupBox(obs_module_text("AudioSettings"), container_);
+                    gp->setObjectName("singleAudioSettings"); audioPage_->layout()->addWidget(gp);
                     auto encLayout = new QGridLayout();
+                    encLayout->setColumnStretch(1, 1);
+                    encLayout->setHorizontalSpacing(16);
+                    encLayout->setVerticalSpacing(12);
                     int currow = 0;
                     {
                         int curcol = 0;
@@ -624,6 +688,9 @@ public:
                         int curcol = 0;
                         encLayout->addWidget(new QLabel(obs_module_text("Encoder"), gp), currow, curcol++);
                         encLayout->addWidget(aenc_ = new QComboBox(gp), currow, curcol++);
+                        aenc_->setObjectName("singleAudioEncoder");
+                        aenc_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                        aenc_->setMinimumContentsLength(24);
                     }
                     ++currow;
                     const int NUM_MIXER_TRACKS = 6;
@@ -631,6 +698,7 @@ public:
                         int curcol = 0;
                         encLayout->addWidget(new QLabel(obs_module_text("AudioMixerID"), gp), currow, curcol++);
                         encLayout->addWidget(a_mixer_ = new QComboBox(gp), currow, curcol++);
+                        a_mixer_->setObjectName("singleAudioTrack");
 
                         for(int i = 1; i <= NUM_MIXER_TRACKS; ++i)
                             a_mixer_->addItem(QString(std::to_string(i).c_str()), i - 1);
@@ -656,39 +724,25 @@ public:
 
                 {
                     auto gp = new QGroupBox(obs_module_text("OtherSettings"), container_);
-                    sub_grid->addWidget(gp, 1, 1, 1, 1);
+                    gp->setObjectName("otherSettingsPage");
+                    outputSettingsTabs_->addTab(gp, obs_module_text("OtherSettings"));
                     auto otherLayout = new QGridLayout();
                     otherLayout->addWidget(syncStart_ = new QCheckBox(obs_module_text("SyncStart"), gp), 0, 0);
                     otherLayout->addWidget(syncStop_ = new QCheckBox(obs_module_text("SyncStop"), gp), 1, 0);
-                    otherLayout->addWidget(streamlabsToken_ = new QCheckBox(obs_module_text("StreamlabsToken"), gp), 2, 0);
-                    otherLayout->addWidget(streamlabsGetToken_ = new QPushButton(obs_module_text("GetStreamlabsToken"), gp), 3, 0);
-                    QObject::connect(streamlabsGetToken_, &QPushButton::clicked, []() {
-                        QDesktopServices::openUrl(QUrl("https://github.com/Loukious/StreamlabsTikTokStreamKeyGenerator"));
-                    });
                     gp->setLayout(otherLayout);
                 }
 
-                {
-                    auto gp = new QGroupBox(obs_module_text("StreamlabsSettings"), container_);
-                    sub_grid->addWidget(gp, 2, 0, 1, 2);
-                    auto labsLayout = new QGridLayout();
-                    labsLayout->addWidget(new QLabel(obs_module_text("StreamlabsTitle"), gp), 0, 0);
-                    labsLayout->addWidget(streamlabsTitle_ = new QLineEdit("", gp), 0, 1);
-                    labsLayout->addWidget(new QLabel(obs_module_text("StreamlabsCategory"), gp), 1, 0);
-                    labsLayout->addWidget(streamlabsCategory_ = new QLineEdit("", gp), 1, 1);
-                    labsLayout->addWidget(streamlabsMatureContent_ = new QCheckBox(obs_module_text("StreamlabsMatureContent"), gp), 2, 0);
-                    gp->setLayout(labsLayout);
-                    gp->setVisible(false);
-                    QObject::connect(streamlabsToken_, &QCheckBox::toggled, gp, &QGroupBox::setVisible);
-                }
-
             }
-            layout->addLayout(sub_grid, 1);
         }
         ++currow;
+        auto okbtn = new QPushButton(obs_module_text("OK"), this);
+        okbtn->setObjectName("saveOutputSettings");
         {
-            auto okbtn = new QPushButton(obs_module_text("OK"), container_);
             QObject::connect(okbtn, &QPushButton::clicked, [this]() {
+                if (!connectionSettings_->Validate()) {
+                    ScheduleResizeToContent();
+                    return;
+                }
                 SaveConfig();
                 auto& global = GlobalMultiOutputConfig();
                 auto it = FindById(global.targets, config_->id);
@@ -697,18 +751,18 @@ public:
                 }
                 done(DialogCode::Accepted);
             });
-            layout->addWidget(okbtn);
         }
 
-        layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+        layout->setSizeConstraint(QLayout::SetMinimumSize);
         container_->setLayout(layout);
 
         scroll_->setWidget(container_);
-        scroll_->setWidgetResizable(false);
+        scroll_->setWidgetResizable(true);
 
         auto fullLayout = new QGridLayout(this);
         fullLayout->setContentsMargins(0, 0, 0, 0);
         fullLayout->addWidget(scroll_, 0, 0);
+        fullLayout->addWidget(okbtn, 1, 0);
         fullLayout->setRowStretch(0, 1);
         fullLayout->setColumnStretch(0, 1);
         setLayout(fullLayout);
@@ -725,6 +779,13 @@ public:
 
     void ConnectWidgetSignals()
     {
+        connectionSettings_->SetMethodChangedCallback([this] {
+            // Retain custom connection values while changing the active output protocol.
+            SaveConfig();
+            updateOutputTab();
+            UpdateUI();
+            ScheduleResizeToContent();
+        });
         QObject::connect(venc_, (void (QComboBox::*)(int)) &QComboBox::currentIndexChanged, [this](){
             SaveConfig();
             LoadConfig();
@@ -852,6 +913,9 @@ public:
 
     void UpdateUI()
     {
+        const bool custom = config_->connectionMethod == ConnectionMethod::Custom;
+        protocolLabel_->setVisible(custom);
+        protocolSelector_->setVisible(custom);
         auto newProtocolIndex = protocolSelector_->findData(QString::fromUtf8(config_->protocol));
         // fallback to RTMP if protocol is invalid - do we really need this line?
         if (newProtocolIndex == -1) newProtocolIndex = 0;
@@ -1002,10 +1066,7 @@ public:
         config_->protocol = tostdu8(protocolSelector_->itemData(protocolSelector_->currentIndex()).toString());
         config_->syncStart = syncStart_->isChecked();
         config_->syncStop = syncStop_->isChecked();
-        config_->streamlabsToken = streamlabsToken_->isChecked();
-        config_->streamlabsTitle = tostdu8(streamlabsTitle_->text());
-        config_->streamlabsCategory = tostdu8(streamlabsCategory_->text());
-        config_->streamlabsMatureContent = streamlabsMatureContent_->isChecked();
+        connectionSettings_->Save(*config_);
         config_->outputParam = outputSettings_->Save();
         config_->serviceParam = serviceSettings_->Save();
 
@@ -1047,10 +1108,7 @@ public:
         protocolSelector_->setCurrentIndex(protocolIndex);
         syncStart_->setChecked(target.syncStart);
         syncStop_->setChecked(target.syncStop);
-        streamlabsToken_->setChecked(target.streamlabsToken);
-        streamlabsTitle_->setText(QString::fromUtf8(target.streamlabsTitle));
-        streamlabsCategory_->setText(QString::fromUtf8(target.streamlabsCategory));
-        streamlabsMatureContent_->setChecked(target.streamlabsMatureContent);
+        connectionSettings_->Load(target);
     }
 
     using IdOrVideoConfig = std::variant<std::string_view, VideoEncoderConfig*>;

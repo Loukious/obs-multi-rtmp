@@ -1,4 +1,6 @@
 #include "pch.h"
+#include "output-config.h"
+bool EditLayoutEncoder(QWidget* parent, const std::string& id, nlohmann::json& params, int& bitrate, bool audio);
 
 class EditOutputWidget : virtual public QDialog {
 public:

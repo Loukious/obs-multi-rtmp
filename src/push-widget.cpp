@@ -12,6 +12,9 @@
 #include "output-config.h"
 #include "protocols.h"
 #include "streamlabs-api.h"
+#include "connection-settings.h"
+#include "tiktok-live-session.h"
+#include "dual-output-session.h"
 
 #include "obs.hpp"
 
@@ -252,6 +255,10 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     obs_output_t* output_ = 0;
     // Owned reference to the service handed to output_ (the output itself only keeps a weak back-pointer).
     obs_service_t* service_ = 0;
+    std::string activeStreamlabsToken_;
+    std::string activeStreamlabsId_;
+    std::unique_ptr<TikTokLiveSession> liveStudioSession_;
+    std::unique_ptr<DualOutputSession> dualSession_;
     bool using_main_video_encoder_ = false;
     bool using_main_audio_encoder_ = false;
     std::shared_ptr<SharedSceneView> scene_view_;
@@ -290,9 +297,11 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
         // Auto-release: obs_service_create keeps its own reference and every
         // early return below would otherwise leak this one.
-        OBSDataAutoRelease conf = obs_data_create_from_json(config_->serviceParam.dump().c_str());
+        OBSDataAutoRelease conf = config_->connectionMethod == ConnectionMethod::Custom
+            ? obs_data_create_from_json(config_->serviceParam.dump().c_str())
+            : obs_data_create();
 
-        auto protocolInfo = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
+        auto protocolInfo = GetProtocolInfos()->GetInfo(config_->OutputProtocol());
         assert(protocolInfo);
         if (!protocolInfo) {
         	blog(LOG_ERROR, TAG "Invalid protocol \"%s\", maybe broken config file.", config_->protocol.c_str());
@@ -555,17 +564,23 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
     bool ReleaseOutput()
     {
+        dualSession_.reset();
         if (output_) {
             DisconnectSignals(output_);
-
-            // failback: check if the output is still active and force stop it if necessary
             if (obs_output_active(output_))
                 obs_output_force_stop(output_);
-
+        }
+        if (liveStudioSession_) {
+            liveStudioSession_->Stop();
+            liveStudioSession_.reset();
+        }
+        if (output_) {
             // obs_output_destroy() clears the service's back-pointer
             obs_output_release(output_);
             output_ = nullptr;
         }
+
+        EndStreamlabsSession();
 
         // Safe here: the output that referenced the service is gone by now.
         ReleaseOutputService();
@@ -579,6 +594,21 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
     void UpdateStreamStatus() {
         using namespace std::chrono;
+
+        if (dualSession_) {
+            const bool running = dualSession_->Running();
+            isConnecting_ = running && !dualSession_->Live();
+            isReconnecting_ = false;
+            SetMsg(dualSession_->Status());
+            btn_->setText(obs_module_text(running ? "Status.Stop" : "Btn.Start"));
+            btn_->setEnabled(true);
+            remove_btn_->setEnabled(!running);
+            edit_btn_->setEnabled(!running);
+            lastErrorCode_ = dualSession_->Error().isEmpty() ? 0 : -1;
+            if (!running) timer_->stop();
+            UpdateStatusDot(!running);
+            return;
+        }
 
         if (!output_)
             return;
@@ -774,14 +804,30 @@ public:
             return;
         }
 
+        if (const auto error = ValidateConnectionSettings(*config_)) {
+            SetMsg(obs_module_text(error));
+            return;
+        }
+
         // recreate output
         ReleaseOutput();
+
+        if (config_->UsesDualLayout()) {
+            dualSession_ = std::make_unique<DualOutputSession>();
+            const bool started = dualSession_->Start(*config_, [this](const nlohmann::json& devices) {
+                config_->tiktokDeviceProfiles = devices;
+                SaveMultiOutputConfig();
+            });
+            UpdateStreamStatus();
+            if (started) timer_->start(250);
+            return;
+        }
 
         if (output_ == nullptr)
         {
             OBSDataAutoRelease output_settings = obs_data_create_from_json(config_->outputParam.dump().c_str());
 
-            auto protocolInfo = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
+            auto protocolInfo = GetProtocolInfos()->GetInfo(config_->OutputProtocol());
             assert(protocolInfo);
             if (!protocolInfo) {
 	        	blog(LOG_ERROR, TAG "Invalid protocol \"%s\", maybe broken config file.", config_->protocol.c_str());
@@ -830,48 +876,46 @@ public:
                 if (useDelay && delaySec > 0)
                     isUseDelay_ = true;
             }
-            if (config_->streamlabsToken) {
-                obs_service_t *service = obs_output_get_service(output_);
-                obs_data_t *servSettings = obs_service_get_settings(service);
-                bool use_auth = obs_data_get_bool(servSettings, "use_auth");
-                const char *pass = obs_data_get_string(servSettings, "password");
-
-                if (use_auth) {
-                    if (pass && strlen(pass) > 0) {
-                        std::string token = pass;
-                        auto [success, errorMessage, newServer, newKey] = StreamlabsAPI::StartStream(token, config_->streamlabsTitle, StreamlabsAPI::CategorySearch(token, config_->streamlabsCategory), config_->streamlabsMatureContent ? 1 : 0);
-                        if (success) {
-                            // Update the service with the new server and key
-                            obs_service_t* service = obs_output_get_service(output_);
-                            if (service) {
-                                obs_data_t* servSettings = obs_service_get_settings(service);
-                                if (servSettings) {
-                                    obs_data_set_string(servSettings, "key", newKey.c_str());
-                                    obs_data_set_string(servSettings, "server", newServer.c_str());
-                                    obs_service_update(service, servSettings);
-                                    obs_data_release(servSettings);
-                                }
-                            }
-                        } else {
-                            SetMsg(QString::fromStdString(errorMessage));
-                            return;
-                        }
-        
-
-
-                    } else {
-                        SetMsg(obs_module_text("Error.StreamlabsToken"));
-                        return;
-                    }
+            if (config_->connectionMethod == ConnectionMethod::Streamlabs) {
+                const auto& token = config_->streamlabsAccessToken;
+                auto [success, errorMessage, newServer, newKey] = StreamlabsAPI::StartStream(
+                    token, config_->streamlabsTitle, config_->streamlabsCategoryId.has_value()
+                        ? *config_->streamlabsCategoryId : StreamlabsAPI::CategorySearch(token, config_->streamlabsCategory),
+                    config_->streamlabsMatureContent ? 1 : 0);
+                if (!success) {
+                    ReleaseOutput();
+                    SetMsg(QString::fromStdString(errorMessage));
+                    return;
                 }
-                obs_data_release(servSettings);
-
+                activeStreamlabsToken_ = token;
+                activeStreamlabsId_ = StreamlabsAPI::ExtractStreamId(newKey);
+                OBSDataAutoRelease settings = obs_service_get_settings(service_);
+                obs_data_set_string(settings, "server", newServer.c_str());
+                obs_data_set_string(settings, "key", newKey.c_str());
+                obs_service_update(service_, settings);
+            }
+            if (config_->connectionMethod == ConnectionMethod::TikTokLiveStudio) {
+                liveStudioSession_ = std::make_unique<TikTokLiveSession>();
+                if (!liveStudioSession_->Start(*config_, output_, [this](const nlohmann::json& devices) {
+                    config_->tiktokDeviceProfiles = devices;
+                    SaveMultiOutputConfig();
+                })) {
+                    const auto error = liveStudioSession_->Error();
+                    ReleaseOutput();
+                    SetMsg(error);
+                    return;
+                }
+                OBSDataAutoRelease settings = obs_service_get_settings(service_);
+                obs_data_set_string(settings, "server", liveStudioSession_->Server().c_str());
+                obs_data_set_string(settings, "key", liveStudioSession_->Key().c_str());
+                obs_service_update(service_, settings);
             }
 
         }
 
         if (!obs_output_start(output_))
         {
+            EndStreamlabsSession();
             ReleaseOutput();
             SetMsg(obs_module_text("Error.StartOutput"));
             return;
@@ -882,6 +926,7 @@ public:
     }
 
     void StopStreaming() override {
+        if (dualSession_) { dualSession_->Stop(); UpdateStreamStatus(); return; }
         if (!IsRunning())
             return;
         
@@ -902,21 +947,18 @@ public:
         else
             obs_output_force_stop(output_);
         
-        if (config_->streamlabsToken) {
-            obs_service_t *service = obs_output_get_service(output_);
-            obs_data_t *servSettings = obs_service_get_settings(service);
-            bool use_auth = obs_data_get_bool(servSettings, "use_auth");
-            const char *pass = obs_data_get_string(servSettings, "password");
-            const char *key = obs_data_get_string(servSettings, "key");
+        // Keep the remote room and packet signer alive while OBS drains delay.
+        // OnStopped ends the session after the final encoded packet.
+    }
 
-            if (use_auth) {
-                if (pass && strlen(pass) > 0) {
-                    std::string token = pass;
-                    StreamlabsAPI::EndStream(token, StreamlabsAPI::ExtractStreamId(key));
-                }
-            }
-            obs_data_release(servSettings);
-        }
+    void EndStreamlabsSession() {
+        if (activeStreamlabsToken_.empty())
+            return;
+        const auto token = std::move(activeStreamlabsToken_);
+        const auto id = std::move(activeStreamlabsId_);
+        activeStreamlabsToken_.clear();
+        activeStreamlabsId_.clear();
+        StreamlabsAPI::EndStream(token, id);
     }
    
     void OnOBSEvent(obs_frontend_event ev) override
@@ -954,6 +996,7 @@ public:
 
     bool IsRunning() override
     {
+        if (dualSession_) return dualSession_->Running();
         return output_ != nullptr && obs_output_active(output_);
     }
 
@@ -964,8 +1007,10 @@ public:
         config_->enabled = enabled;
         if (enabled_cb_ && enabled_cb_->isChecked() != enabled)
             enabled_cb_->setChecked(enabled);
-        if (!enabled && IsRunning())
-            obs_output_force_stop(output_);
+        if (!enabled && IsRunning()) {
+            if (dualSession_) dualSession_->Stop();
+            else obs_output_force_stop(output_);
+        }
         SaveMultiOutputConfig();
         UpdateStatusDot();
     }
@@ -985,7 +1030,8 @@ public:
     {
         if (IsRunning())
         {
-            obs_output_force_stop(output_);
+            if (dualSession_) dualSession_->Stop();
+            else obs_output_force_stop(output_);
         }
     }
 
@@ -1029,6 +1075,7 @@ public:
     void OnStarted() override
     {
         RunInUIThread([this]() {
+            if (liveStudioSession_) liveStudioSession_->ConfirmStarted();
             isStarting_ = false;
             isConnecting_ = false;
             isReconnecting_ = false;
@@ -1087,6 +1134,9 @@ public:
     void OnStopped(int code) override
     {
         RunInUIThread([this, code]() {
+            EndStreamlabsSession();
+            if (liveStudioSession_)
+                liveStudioSession_->Stop();
             ReleaseOutputSceneView();
 
             isStarting_ = false;
@@ -1123,6 +1173,8 @@ public:
                     break;
             }
 
+            if (liveStudioSession_ && !liveStudioSession_->Error().isEmpty())
+                SetMsg(liveStudioSession_->Error());
             UpdateStatusDot(true);
         });
     }

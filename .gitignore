@@ -8,6 +8,11 @@
 !/data
 !/flatpak
 !/src
+!/tests
+!/docs
+/docs/*
+!/docs/dual-layout-design.md
+!/docs/qr-login-recovery.md
 !.clang-format
 !.gersemirc
 !.gitignore

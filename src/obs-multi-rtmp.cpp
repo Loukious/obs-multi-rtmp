@@ -13,6 +13,10 @@
 #include "plugin-support.h"
 
 #include "output-config.h"
+#include "primary-output.h"
+#include "primary-settings.h"
+#include "tiktok-native/rapidapi_quota.hpp"
+#include "tiktok-safety.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -291,6 +295,14 @@ public:
             label->setOpenExternalLinks(true);
             layout_->addWidget(label);
         }
+
+        auto extensionCredit = new QLabel(
+            u8"TikTok Extension By: Loukious (<a href=\"https://buymeacoffee.com/loukious/\">donate</a>)", container_);
+        extensionCredit->setTextFormat(Qt::RichText);
+        extensionCredit->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        extensionCredit->setOpenExternalLinks(true);
+        extensionCredit->setWordWrap(true);
+        layout_->addWidget(extensionCredit);
 
         scroll_.setWidgetResizable(true);
         scroll_.setWidget(container_);
@@ -574,6 +586,13 @@ bool obs_module_load()
     auto mainwin = (QMainWindow*)obs_frontend_get_main_window();
     if (mainwin == nullptr)
         return false;
+    char* quotaDirectory = obs_module_config_path("rapidapi-quota");
+    if (quotaDirectory) {
+        SetRapidApiQuotaDirectory(QString::fromUtf8(quotaDirectory));
+        bfree(quotaDirectory);
+    }
+    RegisterPrimaryTikTokOutput();
+    InstallPrimaryTikTokFrontend();
     QMetaObject::invokeMethod(mainwin, []() {
         s_service.uiThread_ = QThread::currentThread();
     });
@@ -637,4 +656,10 @@ bool obs_module_load()
 const char *obs_module_description(void)
 {
     return "Multiple RTMP Output Plugin";
+}
+
+void obs_module_unload()
+{
+    ShutdownTikTokSafety();
+    ReleasePrimaryTikTokObjects();
 }
