@@ -20,7 +20,7 @@ When upgrading to OBS 33+, use the standard installer or ZIP. OBS prioritizes th
 - **QR login:** scan and confirm on your phone. Expired codes renew automatically, and temporary connection failures retry while keeping the code visible.
 - **Named cookie exports:** successful QR logins save `cookies_<username>.json`. Repeat logins add a suffix to preserve existing files, and exported JSON works with both LIVE Studio and Mobile.
 - **Portrait and landscape together:** eligible LIVE Studio and Android Camera LIVE accounts can stream dual layouts with independent scenes, resolutions, encoders, and optional separate audio tracks.
-- **Vertical scene rendering:** single dock outputs render selected Aitum custom-sized scenes and OBS canvas scenes at their own dimensions before applying the encoder resolution.
+- **Aitum Vertical scenes:** single dock outputs list scenes from native OBS canvases, including Aitum Vertical, and render the selected scene at its own dimensions before encoder scaling.
 - **LIVE controls:** topic selection, searchable games, gifts, comments, and content disclosure settings for native TikTok connections.
 - **Account and session feedback:** Streamlabs eligibility, native dual-layout eligibility, RapidAPI quota, and detailed provider errors.
 - **LIVE violations and appeals:** automatic notifications while streaming, manual violation checks, and account-verified appeal submission where supported.
@@ -42,6 +42,8 @@ To add TikTok as a secondary destination instead:
    - **TikTok — Streamlabs**: enter a required Streamlabs token from [StreamLabsTikTokStreamKeyGenerator](https://github.com/Loukious/StreamLabsTikTokStreamKeyGenerator), then set your title and category.
    - **TikTok — LIVE Studio / Mobile**: choose the desktop or Android client, enter a required RapidAPI key, and browse to a TikTok cookie file. Use the [TikTok LIVE Studio API signer](https://tiktok-live-studio-api-signer1.p.rapidapi.com/) subscription associated with your key.
 5. Click **OK**, then **Start** in the Multiple output dock. TikTok methods obtain the server/key automatically.
+
+For an Aitum Vertical scene in a single target, configure the target's own video encoder in **Video Settings**, then choose its scene in **Scene**. Scenes on other native OBS canvases include their canvas name, such as **Vertical Scene — Aitum Vertical**. Set the output resolution to match the portrait scene, for example **1080x1920**. Use an Aitum version that creates a native OBS canvas. Scene selections are saved by scene ID; older name-only selections appear as unavailable and must be selected again before streaming.
 
 Both TikTok methods show the account username below their credentials. Account checks run in the background after inputs change; **Refresh** retries the check or rereads an updated cookie file. Streamlabs uses `GET /api/v5/slobs/tiktok/info` (`user.username`). LIVE Studio and Mobile use the signed `GET /passport/account/info/v2/` endpoint with the selected cookie session. Android automatically registers missing IDs before its account check. Account checks never start a LIVE. A lookup failure does not prevent saving the connection. Custom URL/key connections retain their service's authentication username field.
 

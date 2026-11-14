@@ -4,6 +4,7 @@
 #include "dual-layout-widget.h"
 #include "layout-scene.h"
 #include "shared-scene-view.h"
+#include "output-scene.h"
 #include "edit-widget.h"
 #include "connection-settings.h"
 #include "connection-login.h"
@@ -886,23 +887,16 @@ static void SingleSceneFixture() {
     capture.stop = [](void* p, uint64_t) { obs_output_signal_stop(static_cast<obs_output_t*>(p), OBS_OUTPUT_SUCCESS); };
     capture.encoded_packet = [](void*, encoder_packet* packet) { if (packet) ++stats[0].videos; };
     obs_register_output(&capture);
-    // Issue #4: a custom-sized Aitum scene must not be rendered through the
+    // Issue #4: a native portrait scene must not be rendered through the
     // landscape main canvas before scaling to the requested portrait output.
     obs_video_info info{}; Check(obs_get_video_info(&info), "Main video info");
     info.base_width = info.output_width = 180;
     info.base_height = info.output_height = 320;
-    OBSCanvasAutoRelease canvas = obs_canvas_create_private("Portrait fixture", &info, 0);
+    OBSCanvasAutoRelease canvas = obs_canvas_create("Portrait fixture", &info, SCENE_REF);
     Check(canvas != nullptr, "Portrait canvas creation");
-    for (bool legacy : {true, false}) {
-        OBSSceneAutoRelease scene = legacy ? obs_scene_create_private("Aitum-style scene")
-            : obs_canvas_scene_create(canvas, "Native portrait scene");
+    {
+        OBSSceneAutoRelease scene = obs_canvas_scene_create(canvas, "Native portrait scene");
         auto source = obs_scene_get_source(scene);
-        if (legacy) {
-            OBSDataAutoRelease settings = obs_source_get_settings(source);
-            obs_data_set_bool(settings, "custom_size", true);
-            obs_data_set_int(settings, "cx", 180); obs_data_set_int(settings, "cy", 320);
-            obs_source_load2(source);
-        }
         Check(obs_source_get_width(source) == 180 && obs_source_get_height(source) == 320,
             "Scene exposes its portrait dimensions");
         OBSDataAutoRelease settings = obs_data_create(); obs_data_set_int(settings, "color", 0xffffffff);
@@ -911,7 +905,12 @@ static void SingleSceneFixture() {
         vec2 scale{180.f / 320, 320.f / 180}; obs_sceneitem_set_scale(item, &scale);
         OBSEncoderAutoRelease encoder = obs_video_encoder_create("test_h264", "Single portrait", nullptr, nullptr);
         obs_encoder_set_scaled_size(encoder, 90, 160);
-        auto view = GetSharedSceneViewManager().Acquire(encoder, source);
+        VideoEncoderConfig selected;
+        selected.outputScene = obs_source_get_name(source);
+        selected.outputSceneUuid = obs_source_get_uuid(source);
+        OBSSourceAutoRelease resolved = ResolveConfiguredScene(selected);
+        Check(resolved == source, "Selected portrait scene resolves by UUID before encoding");
+        auto view = GetSharedSceneViewManager().Acquire(encoder, resolved);
         Check(bool(view), "Single output scene view");
         auto shared = GetSharedSceneViewManager().Acquire(encoder, source);
         Check(shared == view, "Outputs sharing an encoder retain the same scene view");
@@ -923,7 +922,7 @@ static void SingleSceneFixture() {
         stats[0].Reset();
         Check(obs_output_start(output), "Start single scene encoder");
         Until([] { return stats[0].videos >= 5; });
-        OBSSceneAutoRelease other = obs_scene_create_private("Landscape switch");
+        OBSSceneAutoRelease other = obs_scene_create("Landscape switch");
         Check(!GetSharedSceneViewManager().Acquire(encoder, obs_scene_get_source(other)),
             "Cannot resize a scene view used by a live shared encoder");
         Check(GetSharedSceneViewManager().Acquire(encoder, source) == shared,
@@ -940,10 +939,152 @@ static void SingleSceneFixture() {
             "Stopped shared encoder rebuilds its view when scene dimensions change");
         switched.reset();
         shared.reset();
-        if (!legacy) obs_canvas_scene_remove(scene);
+        obs_canvas_scene_remove(scene);
+        obs_canvas_scene_remove(other);
     }
     obs_canvas_remove(canvas);
-    std::cout << "PASS: single-output portrait pixels, native/custom scene sizes and shared view lifetime\n";
+    std::cout << "PASS: single-output native portrait pixels and shared view lifetime\n";
+}
+
+static void SingleSceneEditorFixture() {
+    // Aitum's vertical scenes belong to a different canvas, and can have the
+    // same name as a main-canvas scene. Persist the selected source identity.
+    obs_video_info info{}; Check(obs_get_video_info(&info), "Main video info for scene selection");
+    info.base_width = info.output_width = 180;
+    info.base_height = info.output_height = 320;
+    OBSCanvasAutoRelease canvas = obs_canvas_create("Aitum Vertical fixture", &info, SCENE_REF);
+    OBSCanvasAutoRelease generatedCanvas = obs_canvas_create("Generated fixture", &info, SCENE_REF);
+    OBSCanvasAutoRelease ephemeralCanvas = obs_canvas_create("Internal fixture", &info, SCENE_REF | EPHEMERAL);
+    Check(canvas && generatedCanvas && ephemeralCanvas, "Additional scene selection canvases created");
+    {
+        OBSSceneAutoRelease main = obs_scene_create("Single editor main");
+        OBSSceneAutoRelease sameName = obs_scene_create("Single editor shared name");
+        OBSSceneAutoRelease vertical = obs_canvas_scene_create(canvas, "Single editor shared name");
+        OBSSceneAutoRelease generated = obs_canvas_scene_create(generatedCanvas, "Generated scene fixture");
+        OBSSceneAutoRelease internal = obs_canvas_scene_create(ephemeralCanvas, "Internal scene fixture");
+        auto verticalSource = obs_scene_get_source(vertical);
+        const QString mainId = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(main)));
+        const QString sameNameId = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(sameName)));
+        const QString verticalId = QString::fromUtf8(obs_source_get_uuid(verticalSource));
+        const QString generatedId = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(generated)));
+        const QString internalId = QString::fromUtf8(obs_source_get_uuid(obs_scene_get_source(internal)));
+        Check(QString::fromUtf8(obs_source_get_name(verticalSource)) == obs_source_get_name(obs_scene_get_source(sameName)),
+            "Same-named scenes on different canvases remain distinct sources");
+        OBSDataAutoRelease metadata = obs_source_get_private_settings(obs_scene_get_source(generated));
+        obs_data_set_bool(metadata, GeneratedLayoutKey, true);
+        obs_scene_add(generated, obs_scene_get_source(main));
+
+        auto target = std::make_shared<OutputTargetConfig>();
+        target->id = "single-scene-editor"; target->name = "Single scene fixture";
+        target->serviceParam = {{"server", "rtmp://fixture/live"}, {"key", "fixture"}};
+        auto video = std::make_shared<VideoEncoderConfig>();
+        video->id = "single-scene-encoder"; video->encoderId = "test_h264";
+        video->outputScene = obs_source_get_name(obs_scene_get_source(main));
+        video->resolution = "90x160";
+        target->videoConfig = video->id;
+        auto& global = GlobalMultiOutputConfig();
+        global.targets.push_back(target); global.videoConfig.push_back(video);
+        auto open = [&] {
+            auto editor = std::unique_ptr<EditOutputWidget>(createEditOutputWidget(target->id, nullptr));
+            editor->show(); QApplication::processEvents();
+            return editor;
+        };
+        auto save = [](EditOutputWidget& editor) {
+            editor.findChild<QPushButton*>("saveOutputSettings")->click();
+            Check(!editor.isVisible(), "Valid single-scene settings save and close");
+        };
+        {
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            Check(choices != nullptr, "Single-output editor exposes its scene selector");
+            const int mainIndex = choices->findData(sameNameId, Qt::UserRole + 1);
+            const int verticalIndex = choices->findData(verticalId, Qt::UserRole + 1);
+            Check(mainIndex > 0 && verticalIndex > 0 && mainIndex != verticalIndex,
+                "Single output lists main and Aitum vertical scenes independently");
+            Check(choices->currentIndex() > 0 && choices->currentData().toString() == "Single editor main"
+                && choices->currentData(Qt::UserRole + 1).toString().isEmpty(),
+                "Name-only saved settings remain unavailable until explicitly reselected");
+            OBSSourceAutoRelease unavailable = ResolveConfiguredScene(*video);
+            Check(!unavailable, "A saved scene name without a UUID cannot resolve an output source");
+            Check(choices->itemData(mainIndex).toString() == choices->itemData(verticalIndex).toString()
+                && choices->itemText(mainIndex) != choices->itemText(verticalIndex)
+                && choices->itemText(verticalIndex).contains("Aitum Vertical fixture"),
+                "Scene labels distinguish canvases while retaining raw display names");
+            Check(choices->findData(generatedId, Qt::UserRole + 1) < 0
+                && choices->findData(internalId, Qt::UserRole + 1) < 0,
+                "Generated TikTok compositions and internal canvases stay out of the single scene selector");
+            save(*editor);
+            Check(!video->outputSceneUuid && video->outputScene == "Single editor main",
+                "Saving unchanged name-only settings does not infer a scene UUID");
+        }
+        {
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            choices->setCurrentIndex(choices->findData(mainId, Qt::UserRole + 1));
+            save(*editor);
+            Check(video->outputSceneUuid == mainId.toStdString(),
+                "Explicitly selecting a valid scene records its UUID");
+        }
+        {
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            choices->setCurrentIndex(choices->findData(verticalId, Qt::UserRole + 1));
+            save(*editor);
+            Check(video->outputScene == "Single editor shared name" && video->outputSceneUuid == verticalId.toStdString(),
+                "Single-output save preserves the selected vertical scene name and UUID");
+        }
+        const auto encoded = SerializeMultiOutputConfig(global);
+        auto decoded = DeserializeMultiOutputConfig(encoded);
+        Check(decoded.has_value(), "Saved single output configuration reloads");
+        global = std::move(*decoded);
+        target = FindById(global.targets, "single-scene-editor");
+        video = FindById(global.videoConfig, "single-scene-encoder");
+        Check(target && video && video->outputSceneUuid == verticalId.toStdString(),
+            "Single scene UUID survives JSON export and import");
+        {
+            OBSSourceAutoRelease selected = ResolveConfiguredScene(*video);
+            Check(selected == verticalSource && obs_source_get_width(selected) == 180 && obs_source_get_height(selected) == 320,
+                "Saved single output resolves the portrait scene rather than the same-named main scene");
+        }
+        obs_source_set_name(verticalSource, "Renamed portrait scene");
+        {
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            Check(choices->currentData(Qt::UserRole + 1).toString() == verticalId
+                && choices->currentData().toString() == "Renamed portrait scene",
+                "Renaming a scene keeps the saved single-output selection by UUID");
+            save(*editor);
+            Check(video->outputScene == "Renamed portrait scene", "Saving updates the selected scene's current name");
+        }
+        obs_source_set_name(obs_scene_get_source(sameName), "Renamed portrait scene");
+        obs_source_remove(verticalSource);
+        {
+            OBSSourceAutoRelease missing = ResolveConfiguredScene(*video);
+            Check(!missing, "A missing saved UUID cannot fall back to a different scene with the same name");
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            Check(choices->currentIndex() > 0 && choices->currentData(Qt::UserRole + 1).toString() == verticalId,
+                "Missing saved scene remains selected as an unavailable placeholder");
+            save(*editor);
+            Check(video->outputScene == "Renamed portrait scene" && video->outputSceneUuid == verticalId.toStdString(),
+                "Saving unchanged unavailable scene settings preserves identity");
+        }
+        {
+            auto editor = open();
+            auto choices = editor->findChild<QComboBox*>("singleOutputScene");
+            choices->setCurrentIndex(0); save(*editor);
+            Check(!video->outputScene && !video->outputSceneUuid,
+                "Explicitly choosing the default scene clears the saved scene name and UUID");
+        }
+        global.targets.clear(); global.videoConfig.clear(); global.audioConfig.clear();
+        obs_canvas_scene_remove(main); obs_canvas_scene_remove(sameName);
+        obs_canvas_scene_remove(vertical); obs_canvas_scene_remove(generated); obs_canvas_scene_remove(internal);
+    }
+    obs_canvas_remove(canvas); obs_canvas_remove(generatedCanvas); obs_canvas_remove(ephemeralCanvas);
+    canvas = nullptr; generatedCanvas = nullptr; ephemeralCanvas = nullptr;
+    obs_wait_for_destroy_queue();
+    AssertReleased();
+    std::cout << "PASS: single-output Aitum canvas selector, UUID selection and missing-scene preservation\n";
 }
 
 int main(int argc, char** argv) {
@@ -967,6 +1108,7 @@ int main(int argc, char** argv) {
         obs_audio_info audio{48000, SPEAKERS_STEREO}; Check(obs_reset_audio(&audio), "Audio initialization");
         RegisterSources(); RegisterCaptureCodecs(); RegisterTransport(); RegisterPrimaryTikTokOutput(); InstallHttpFixture();
         SingleSceneFixture();
+        SingleSceneEditorFixture();
         {
             OBSSceneAutoRelease portrait = obs_scene_create("Portrait selection");
             OBSSceneAutoRelease landscape = obs_scene_create("Landscape selection");
