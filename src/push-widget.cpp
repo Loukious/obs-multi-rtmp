@@ -10,6 +10,7 @@
 #include "push-widget.h"
 #include "edit-widget.h"
 #include "output-config.h"
+#include "output-scene.h"
 #include "protocols.h"
 #include "streamlabs-api.h"
 #include "connection-settings.h"
@@ -224,11 +225,10 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             }
             auto videoConfig = FindById(GlobalMultiOutputConfig().videoConfig, config_->videoConfig.value_or(""));
 
-            if (!videoConfig || !videoConfig->outputScene.has_value()) {
+            if (!videoConfig || (!videoConfig->outputScene.has_value() && !videoConfig->outputSceneUuid.has_value())) {
                 obs_encoder_set_video(venc, obs_get_video());
             } else {
-                auto sceneName = *videoConfig->outputScene;
-                OBSSourceAutoRelease scene = obs_get_source_by_name(sceneName.c_str());
+                OBSSourceAutoRelease scene = ResolveConfiguredScene(*videoConfig);
                 if (scene == nullptr) {
                     blog(LOG_ERROR, TAG "Output scene is not found.");
                     return false;

@@ -85,6 +85,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/shared-scene-view.h
   ./src/json-util.hpp
   ./src/output-config.h
+  src/output-scene.h
   ./src/output-config.cpp
   ./src/obs-properties-widget.h
   ./src/obs-properties-widget.cpp

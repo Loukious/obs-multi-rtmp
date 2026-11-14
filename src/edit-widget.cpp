@@ -1,5 +1,6 @@
 #include "edit-widget.h"
 #include "output-config.h"
+#include "output-scene.h"
 #include "connection-settings.h"
 #include "layout-scene.h"
 #include "json-util.hpp"
@@ -639,6 +640,7 @@ public:
                         int curcol = 0;
                         encLayout->addWidget(new QLabel(obs_module_text("Scene"), gp), currow, curcol++);
                         encLayout->addWidget(v_scene_ = new QComboBox(gp), currow, curcol++);
+                        v_scene_->setObjectName("singleOutputScene");
                     }
                     ++currow;
                     {
@@ -894,20 +896,16 @@ public:
 
     void LoadScenes()
     {
+        v_scene_->clear();
         v_scene_->addItem(obs_module_text("SameAsOBSScene"), "");
-
-        using EnumParam = std::vector<std::string>;
-        std::vector<std::string> scenes;
-        obs_enum_scenes([](void* p, obs_source_t* src) {
-            auto scenes = (EnumParam*)p;
-            auto name = obs_source_get_name(src);
-            if (name && *name)
-                scenes->emplace_back(name);
-            return true;
-        }, &scenes);
-
-        for(auto& x: scenes) {
-            v_scene_->addItem(x.c_str(), x.c_str());
+        // Enumerate native canvases, including Aitum Vertical. Display the
+        // canvas in the label, but identify the selected scene by UUID.
+        for (const auto& choice : ReadDualUiCatalog().scenes) {
+            OBSSourceAutoRelease source = obs_get_source_by_uuid(choice.id.toUtf8().constData());
+            if (!IsSelectableOutputScene(source))
+                continue;
+            v_scene_->addItem(choice.name, QString::fromUtf8(obs_source_get_name(source)));
+            v_scene_->setItemData(v_scene_->count() - 1, choice.id, Qt::UserRole + 1);
         }
     }
 
@@ -1015,10 +1013,14 @@ public:
         it->id = *config_->videoConfig;
         it->encoderId = tostdu8(venc_->currentData().toString());
 
-        if (v_scene_->currentIndex() > 0)
+        if (v_scene_->currentIndex() > 0) {
             it->outputScene = tostdu8(v_scene_->currentData().toString());
-        else
+            const auto uuid = tostdu8(v_scene_->currentData(Qt::UserRole + 1).toString());
+            it->outputSceneUuid = uuid.empty() ? std::nullopt : std::optional<std::string>(uuid);
+        } else {
             it->outputScene.reset();
+            it->outputSceneUuid.reset();
+        }
         
         auto resolution = v_resolution_->text().toUtf8();
         if (!resolution.isEmpty())
@@ -1143,10 +1145,32 @@ public:
 
         auto& config = *pconfig;
 
-        if (config.outputScene.has_value()) {
-            auto idx = v_scene_->findData(QString::fromUtf8(*config.outputScene));
-            if (idx >= 0)
-                v_scene_->setCurrentIndex(idx);
+        if (config.outputScene.has_value() || config.outputSceneUuid.has_value()) {
+            OBSSourceAutoRelease source = ResolveConfiguredScene(config);
+            const auto uuid = source ? QString::fromUtf8(obs_source_get_uuid(source))
+                : QString::fromStdString(config.outputSceneUuid.value_or(""));
+            auto idx = uuid.isEmpty() ? -1 : v_scene_->findData(uuid, Qt::UserRole + 1);
+            if (idx < 0) {
+                const auto name = QString::fromStdString(config.outputScene.value_or(""));
+                // Reuse a missing name-only placeholder when the form reloads.
+                // This is display state only; names never resolve a source.
+                for (int i = 1; i < v_scene_->count(); ++i) {
+                    if (uuid.isEmpty() && v_scene_->itemData(i, Qt::UserRole + 2).toBool()
+                        && v_scene_->itemData(i).toString() == name) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx < 0) {
+                    auto unavailable = QString::fromUtf8(obs_module_text("Scene.Unavailable"));
+                    if (unavailable == "Scene.Unavailable") unavailable = "%1 (unavailable)";
+                    v_scene_->addItem(unavailable.arg(name), name);
+                    idx = v_scene_->count() - 1;
+                    v_scene_->setItemData(idx, uuid, Qt::UserRole + 1);
+                    v_scene_->setItemData(idx, true, Qt::UserRole + 2);
+                }
+            }
+            v_scene_->setCurrentIndex(idx);
         } else {
             v_scene_->setCurrentIndex(0);
         }
