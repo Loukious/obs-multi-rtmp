@@ -1,6 +1,7 @@
 #include "dual-layout-widget.h"
 #include "settings-validation.h"
 #include "generated-layout.h"
+#include "canvas-source.h"
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 #include <obs.h>
@@ -25,6 +26,15 @@ DualUiCatalog ReadDualUiCatalog()
     if (!obs_initialized()) return result;
     obs_enum_canvases([](void* data, obs_canvas_t* canvas) {
         if (obs_canvas_get_flags(canvas) & EPHEMERAL || obs_canvas_removed(canvas)) return true;
+        auto& catalog = *static_cast<DualUiCatalog*>(data);
+        obs_video_info info{};
+        if (ReadFollowCanvasVideo(canvas, info)) {
+            DualCanvasChoice choice{QString::fromUtf8(obs_canvas_get_uuid(canvas)),
+                QString::fromUtf8(obs_canvas_get_flags(canvas) & MAIN ? obs_module_text("Dual.MainCanvas") : obs_canvas_get_name(canvas)),
+                static_cast<int>(info.output_width), static_cast<int>(info.output_height)};
+            if (obs_canvas_get_flags(canvas) & MAIN) catalog.liveCanvases.prepend(choice);
+            else catalog.liveCanvases.push_back(choice);
+        }
         if (!(obs_canvas_get_flags(canvas) & MAIN)) static_cast<DualUiCatalog*>(data)->canvases.push_back({QString::fromUtf8(obs_canvas_get_uuid(canvas)), QString::fromUtf8(obs_canvas_get_name(canvas))});
         obs_canvas_enum_scenes(canvas, [](void* inner, obs_source_t* scene) {
             auto& result = *static_cast<DualUiCatalog*>(inner);
@@ -43,6 +53,10 @@ DualUiCatalog ReadDualUiCatalog()
         return true;
     }, &result);
     result.canvases.removeIf([&](const auto& canvas) {
+        return std::any_of(result.generated.begin(), result.generated.end(), [&](const auto& generated) { return generated.canvasId == canvas.id; }) &&
+            std::none_of(result.scenes.begin(), result.scenes.end(), [&](const auto& scene) { return scene.canvasId == canvas.id; });
+    });
+    result.liveCanvases.removeIf([&](const auto& canvas) {
         return std::any_of(result.generated.begin(), result.generated.end(), [&](const auto& generated) { return generated.canvasId == canvas.id; }) &&
             std::none_of(result.scenes.begin(), result.scenes.end(), [&](const auto& scene) { return scene.canvasId == canvas.id; });
     });
@@ -72,7 +86,8 @@ LayoutIssue CheckLayout(const OutputTargetConfig& config)
     if (!config.UsesDualLayout()) return {};
     for (bool portrait : {true, false}) {
         const auto& v = portrait ? config.dualLayout.portrait : config.dualLayout.landscape;
-        if (v.sceneUuid.empty()) return {"Dual.Error.Scene", portrait, InvalidField::Scene};
+        if (v.followCanvas ? v.canvasUuid.empty() : v.sceneUuid.empty())
+            return {v.followCanvas ? "Dual.Error.CanvasMissing" : "Dual.Error.Scene", portrait, InvalidField::Scene};
         if (v.encoderId.empty()) return {"Dual.Error.Encoder", portrait, InvalidField::Encoder};
         if (v.width < 64 || v.width > 4096 || v.width % 2) return {"Dual.Error.Resolution", portrait, InvalidField::Width};
         if (v.height < 64 || v.height > 4096 || v.height % 2 ||
@@ -101,6 +116,18 @@ bool DualLayoutWidget::Validate(const OutputTargetConfig& config)
         };
         for (bool portrait : {true, false}) {
             const auto& v = portrait ? config.dualLayout.portrait : config.dualLayout.landscape;
+            if (v.followCanvas) {
+                const auto canvas = std::find_if(catalog.liveCanvases.begin(), catalog.liveCanvases.end(), [&](const auto& item) {
+                    return item.id == QString::fromStdString(v.canvasUuid);
+                });
+                if (nativeCanvasMode_) issue = {"Dual.Error.CanvasPrimary", portrait, InvalidField::Scene};
+                else if (canvas == catalog.liveCanvases.end()) issue = {"Dual.Error.CanvasMissing", portrait, InvalidField::Scene};
+                else if (canvas->width != v.width || canvas->height != v.height) issue = {"Dual.Error.CanvasSize", portrait, InvalidField::Scene};
+                else if (!contains(catalog.videoEncoders, v.encoderId)) issue = {"Dual.Error.Encoder", portrait, InvalidField::Encoder};
+                else if (!contains(catalog.audioEncoders, LayoutAudio(config.dualLayout, portrait).encoderId)) issue = {"Dual.Error.Audio", portrait, InvalidField::AudioEncoder};
+                if (issue.key) break;
+                continue;
+            }
             const auto generated = std::find_if(catalog.generated.begin(), catalog.generated.end(), [&](const auto& entry) {
                 return entry.sceneId == QString::fromStdString(v.sceneUuid) && entry.canvasId == QString::fromStdString(v.canvasUuid) &&
                     contains(catalog.scenes, entry.inputId.toStdString());
@@ -129,7 +156,8 @@ bool DualLayoutWidget::Validate(const OutputTargetConfig& config)
     case InvalidField::AudioEncoder: field = audio.encoder; label = audioError_; break;
     case InvalidField::AudioBitrate: field = audio.bitrate; label = audioError_; break;
     }
-    if (!field->isEnabled() && (issue.field == InvalidField::Width || issue.field == InvalidField::Height)) field = video.canvas;
+    if (!field->isEnabled() && (issue.field == InvalidField::Width || issue.field == InvalidField::Height))
+        field = (issue.portrait ? config.dualLayout.portrait.followCanvas : config.dualLayout.landscape.followCanvas) ? video.scene : video.canvas;
     const char* layout = label == audioError_ && config.dualLayout.sameAudio ? "Dual.SharedAudio" : issue.portrait ? "Dual.Portrait" : "Dual.Landscape";
     label->setText(QString::fromUtf8(obs_module_text(layout)) + ": " + obs_module_text(issue.key)); label->show();
     RevealSettingsError(field, label);
@@ -207,6 +235,7 @@ DualLayoutWidget::VideoFields DualLayoutWidget::AddVideo(const QString& prefix, 
     f.canvas->hide(); f.canvasLabel->hide();
     f.scene = new QComboBox(f.group);
     f.scene->setObjectName(prefix + "Scene");
+    QObject::connect(f.scene, &QComboBox::activated, this, [this] { RefreshCatalog(); if (changed_) changed_(); });
     f.encoder = new QComboBox(f.group);
     f.encoder->setObjectName(prefix + "VideoEncoder");
     f.width = Number(f.group, prefix + "Width", 64, 4096, prefix == "portrait" ? 1080 : 1920);
@@ -345,6 +374,7 @@ static void Choices(QComboBox* combo, const QVector<DualChoice>& choices, bool b
 {
     const auto id = combo->currentData().toString();
     const auto name = combo->currentData(Qt::UserRole + 1).isValid() ? combo->currentData(Qt::UserRole + 1).toString() : combo->currentText();
+    const auto canvasName = combo->currentData(Qt::UserRole + 2);
     QSignalBlocker block(combo);
     combo->clear();
     if (blank) combo->addItem(QString(), QString());
@@ -354,7 +384,10 @@ static void Choices(QComboBox* combo, const QVector<DualChoice>& choices, bool b
         combo->addItem(name + " (" + obs_module_text("Dual.Missing") + ")", id); index = combo->count() - 1;
         combo->setItemData(index, name, Qt::UserRole + 1);
     }
-    if (index >= 0) combo->setCurrentIndex(index);
+    if (index >= 0) {
+        combo->setCurrentIndex(index);
+        if (canvasName.isValid()) combo->setItemData(index, canvasName, Qt::UserRole + 2);
+    }
 }
 
 void DualLayoutWidget::RefreshCatalog()
@@ -364,11 +397,25 @@ void DualLayoutWidget::RefreshCatalog()
         Choices(f->canvas, catalog.canvases, true);
         f->canvas->setItemText(0, obs_module_text("Primary.NewCanvas"));
         QVector<DualChoice> scenes;
+        if (!nativeCanvasMode_) {
+            for (const auto& canvas : catalog.liveCanvases)
+                scenes.push_back({"canvas:" + canvas.id, QString::fromUtf8(obs_module_text("Dual.CanvasSource")).arg(canvas.name)});
+        }
         const auto selected = nativeCanvasMode_ ? f->canvas->currentData().toString() : QString();
         for (const auto& scene : catalog.scenes) if (selected.isEmpty() || scene.canvasId == selected) scenes.push_back(scene);
         Choices(f->scene, scenes, true);
         f->scene->setItemText(0, obs_module_text("Dual.SelectScene"));
-        f->width->setEnabled(selected.isEmpty()); f->height->setEnabled(selected.isEmpty()); f->fit->setEnabled(selected.isEmpty());
+        const auto sourceId = f->scene->currentData().toString();
+        const bool follows = !nativeCanvasMode_ && sourceId.startsWith("canvas:");
+        for (const auto& canvas : catalog.liveCanvases) {
+            const auto index = f->scene->findData("canvas:" + canvas.id);
+            if (index >= 0) f->scene->setItemData(index, canvas.name, Qt::UserRole + 2);
+            if (follows && sourceId == "canvas:" + canvas.id) {
+                QSignalBlocker width(f->width), height(f->height);
+                f->width->setValue(canvas.width); f->height->setValue(canvas.height);
+            }
+        }
+        f->width->setEnabled(selected.isEmpty() && !follows); f->height->setEnabled(selected.isEmpty() && !follows); f->fit->setEnabled(selected.isEmpty() && !follows);
         Choices(f->encoder, catalog.videoEncoders, false);
         Choices(f->audio.encoder, catalog.audioEncoders, false);
     }
@@ -400,7 +447,13 @@ void DualLayoutWidget::LoadVideo(VideoFields& f, const LayoutVideoConfig& c, con
     f.prepared.reset(); f.inputId.clear();
     auto sceneId = QString::fromStdString(c.sceneUuid), sceneName = QString::fromStdString(c.sceneName);
     auto canvasId = QString::fromStdString(c.canvasUuid);
+    if (c.followCanvas) {
+        sceneId = "canvas:" + canvasId;
+        sceneName = QString::fromUtf8(obs_module_text("Dual.CanvasSource")).arg(QString::fromStdString(c.canvasName));
+        canvasId.clear();
+    }
     for (const auto& generated : catalog.generated) {
+        if (c.followCanvas) break;
         if (generated.sceneId != sceneId || generated.canvasId != canvasId) continue;
         f.prepared = c; f.inputId = generated.inputId;
         sceneId = generated.inputId; sceneName = generated.inputName; canvasId.clear(); break;
@@ -412,17 +465,27 @@ void DualLayoutWidget::LoadVideo(VideoFields& f, const LayoutVideoConfig& c, con
     Select(f.canvas, canvasId);
     f.params = c.encoderParams; f.fps->setValue(c.fpsDivisor);
     Select(f.scene, sceneId, sceneName);
+    if (c.followCanvas) f.scene->setItemData(f.scene->currentIndex(), QString::fromStdString(c.canvasName), Qt::UserRole + 2);
     Select(f.encoder, QString::fromStdString(c.encoderId));
     f.width->setValue(c.width); f.height->setValue(c.height); f.bitrate->setValue(c.bitrate); f.fit->setCurrentIndex(c.crop ? 1 : 0); LoadAudio(f.audio, c.audio);
 }
 void DualLayoutWidget::SaveVideo(const VideoFields& f, LayoutVideoConfig& c)
 {
+    const auto selected = f.scene->currentData().toString();
+    c.followCanvas = selected.startsWith("canvas:");
     c.canvasUuid = f.canvas->currentData().toString().toStdString();
     c.encoderParams = f.params; c.fpsDivisor = f.fps->value();
     c.sceneUuid = f.scene->currentData().toString().toStdString();
     c.sceneName = (f.scene->currentData(Qt::UserRole + 1).isValid() ? f.scene->currentData(Qt::UserRole + 1).toString() : f.scene->currentText()).toStdString();
     c.encoderId = f.encoder->currentData().toString().toStdString();
     c.width = f.width->value(); c.height = f.height->value(); c.bitrate = f.bitrate->value(); c.crop = f.fit->currentData().toBool(); SaveAudio(f.audio, c.audio);
+    if (c.followCanvas) {
+        c.canvasUuid = selected.mid(7).toStdString(); c.sceneUuid.clear(); c.sceneName.clear(); c.crop = false;
+        c.canvasName = (f.scene->currentData(Qt::UserRole + 2).isValid() ? f.scene->currentData(Qt::UserRole + 2).toString()
+            : f.scene->currentData(Qt::UserRole + 1).toString()).toStdString();
+        return;
+    }
+    c.canvasName.clear();
     // The form selects an input scene; the transport retains its prepared
     // output only while that scene and its composition are unchanged.
     if (f.prepared && c.canvasUuid.empty() && f.scene->currentData().toString() == f.inputId &&

@@ -6,6 +6,10 @@
 #include <obs-module.h>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QCoreApplication>
+#include <QThread>
+#include <QEventLoop>
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -18,12 +22,19 @@ struct OutputFeed {
     LayoutScene scene;
     std::atomic_bool started{false}, stopped{false}, reconnecting{false};
     std::atomic_int stopCode{0};
-    bool startRequested = false;
+    bool startRequested = false, stopRequested = false;
     uint64_t lastBytes = 0;
     double kbps = 0;
     static void Started(void* p, calldata_t*) { auto& s = *static_cast<OutputFeed*>(p); s.started = true; s.reconnecting = false; }
     static void Stopped(void* p, calldata_t* data) { auto& s = *static_cast<OutputFeed*>(p); s.stopCode = static_cast<int>(calldata_int(data, "code")); s.stopped = true; }
     static void Reconnect(void* p, calldata_t*) { static_cast<OutputFeed*>(p)->reconnecting = true; }
+    bool FullyStopped() const { return (!startRequested || stopped) && (!output || !obs_output_active(output)); }
+    void RequestStop() {
+        if (output && startRequested && !stopped && !stopRequested) {
+            stopRequested = true;
+            obs_output_force_stop(output);
+        }
+    }
     void Connect(bool enabled) {
         auto handler = obs_output_get_signal_handler(output);
         auto connect = enabled ? signal_handler_connect : signal_handler_disconnect;
@@ -131,6 +142,7 @@ bool DualOutputSession::Start(const OutputTargetConfig& config, std::function<vo
         auto& f = *s.feeds[i];
         f.startRequested = true;
         if (!obs_output_start(f.output)) {
+            f.startRequested = false;
             s.error = QString::fromUtf8(obs_module_text(i == 0 ? "Dual.Portrait" : "Dual.Landscape")) + ": " + obs_module_text("Error.StartOutput");
             Finish(); return false;
         }
@@ -148,11 +160,13 @@ void DualOutputSession::Poll()
     const auto elapsed = s.statistics.elapsed();
     for (size_t i = 0; i < s.feeds.size(); ++i) {
         auto& f = *s.feeds[i];
-        if (!f.scene.SourceExists() && !s.stopping) { s.error = obs_module_text("Dual.Error.SceneMissing"); Stop(); }
+        if (const auto error = f.scene.AvailabilityError(); error && !s.stopping) {
+            s.error = obs_module_text(error); Stop();
+        }
         allStarted = allStarted && f.started && !f.stopped;
         // A connecting output is not active yet. Only its stop signal proves
         // that an accepted start request has finished shutting down.
-        allStopped = allStopped && (!f.startRequested || f.stopped);
+        allStopped = allStopped && f.FullyStopped();
         if (f.stopped && !s.stopping) {
             s.error = QString::fromUtf8(obs_module_text(i == 0 ? "Dual.Portrait" : "Dual.Landscape")) + ": " + obs_module_text("Dual.OutputStopped");
             const char* detail = obs_output_get_last_error(f.output);
@@ -176,14 +190,20 @@ void DualOutputSession::Stop()
     if (!s.running || s.stopping) return;
     s.stopping = true;
     if (s.preparing && s.live) s.live->CancelPreparation();
-    for (const auto& f : s.feeds) if (f && f->output && f->startRequested && !f->stopped) obs_output_force_stop(f->output);
+    for (const auto& f : s.feeds) if (f) f->RequestStop();
 }
 void DualOutputSession::Finish()
 {
     auto& s = *state_;
     if (s.finishing) return;
     s.finishing = true; s.timer.stop();
-    for (const auto& f : s.feeds) if (f && f->output && obs_output_active(f->output)) obs_output_force_stop(f->output);
+    for (const auto& f : s.feeds) if (f) f->RequestStop();
+    // A stop signal precedes encoder teardown in libobs. Preserve packet
+    // signing until accepted starts are terminal and data capture is inactive.
+    while (std::any_of(s.feeds.begin(), s.feeds.end(), [](const auto& f) { return f && !f->FullyStopped(); })) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 10);
+        QThread::msleep(2);
+    }
     if (s.live) {
         s.live->Stop();
         if (!s.live->Error().isEmpty() && !s.error.contains(s.live->Error())) s.error += (s.error.isEmpty() ? "" : "\n") + s.live->Error();

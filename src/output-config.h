@@ -61,6 +61,8 @@ struct LayoutVideoConfig {
     int fpsDivisor = 1;
     nlohmann::json encoderParams = nlohmann::json::object();
     std::string canvasUuid;
+    bool followCanvas = false;
+    std::string canvasName;
 };
 struct DualLayoutConfig {
     bool enabled = false;

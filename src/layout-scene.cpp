@@ -1,4 +1,5 @@
 #include "layout-scene.h"
+#include "canvas-source.h"
 #include <obs.hpp>
 #include <obs-module.h>
 #include <graphics/vec2.h>
@@ -8,6 +9,13 @@
 #include <QResizeEvent>
 #include <QWindow>
 #include <algorithm>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <obs-nix-platform.h>
+#if QT_VERSION < QT_VERSION_CHECK(6, 9, 0)
+#include <QGuiApplication>
+#include <qpa/qplatformnativeinterface.h>
+#endif
+#endif
 
 bool EnsureLayoutCanvasVideo(obs_canvas_t* canvas, const LayoutVideoConfig& config, QString* error)
 {
@@ -42,6 +50,17 @@ LayoutScene::~LayoutScene()
 bool LayoutScene::Create(const LayoutVideoConfig& config, QString* error)
 {
     if (canvas_) { *error = "Layout scene already initialized."; return false; }
+    if (config.followCanvas) {
+        borrowedCanvas_ = followsCanvas_ = true;
+        canvas_ = obs_get_canvas_by_uuid(config.canvasUuid.c_str());
+        obs_video_info info{};
+        if (!ReadFollowCanvasVideo(canvas_, info)) { *error = obs_module_text("Dual.Error.CanvasMissing"); return false; }
+        if (info.output_width != static_cast<uint32_t>(config.width) || info.output_height != static_cast<uint32_t>(config.height)) {
+            *error = obs_module_text("Dual.Error.CanvasSize"); return false;
+        }
+        outputWidth_ = info.output_width; outputHeight_ = info.output_height;
+        return true;
+    }
     source_ = obs_get_source_by_uuid(config.sceneUuid.c_str());
     if (!source_ || !obs_source_is_scene(source_) || obs_source_removed(source_)) {
         *error = obs_module_text("Dual.Error.SceneMissing"); return false;
@@ -81,6 +100,7 @@ bool LayoutScene::Create(const LayoutVideoConfig& config, QString* error)
 bool LayoutScene::CreatePreview(const LayoutVideoConfig& config, QString* error)
 {
     if (canvas_) { *error = "Layout scene already initialized."; return false; }
+    if (config.followCanvas) return Create(config, error);
     if (!config.canvasUuid.empty()) {
         OBSSourceAutoRelease source = obs_get_source_by_uuid(config.sceneUuid.c_str());
         if (!source || !obs_source_is_scene(source) || obs_source_removed(source)) {
@@ -101,11 +121,26 @@ bool LayoutScene::CreatePreview(const LayoutVideoConfig& config, QString* error)
 video_t* LayoutScene::Video() const { return canvas_ ? obs_canvas_get_video(canvas_) : nullptr; }
 void LayoutScene::Render() const { if (canvas_) obs_canvas_render(canvas_); }
 bool LayoutScene::SourceExists() const {
+    if (followsCanvas_) {
+        obs_video_info info{};
+        return ReadFollowCanvasVideo(canvas_, info) && info.output_width == outputWidth_ && info.output_height == outputHeight_;
+    }
     if (!source_ || obs_source_removed(source_)) return false;
     auto canvas = obs_source_get_canvas(source_);
     const bool available = canvas && !obs_canvas_removed(canvas);
     if (canvas) obs_canvas_release(canvas);
     return available;
+}
+int LayoutScene::BaseWidth() const { obs_video_info info{}; return canvas_ && obs_canvas_get_video_info(canvas_, &info) ? static_cast<int>(info.base_width) : 0; }
+int LayoutScene::BaseHeight() const { obs_video_info info{}; return canvas_ && obs_canvas_get_video_info(canvas_, &info) ? static_cast<int>(info.base_height) : 0; }
+const char* LayoutScene::AvailabilityError() const {
+    if (followsCanvas_) {
+        obs_video_info info{};
+        if (!ReadFollowCanvasVideo(canvas_, info)) return "Dual.Error.CanvasMissing";
+        if (info.output_width != outputWidth_ || info.output_height != outputHeight_) return "Dual.Error.CanvasSize";
+        return nullptr;
+    }
+    return SourceExists() ? nullptr : "Dual.Error.SceneMissing";
 }
 
 namespace {
@@ -127,11 +162,13 @@ public:
     QPaintEngine* paintEngine() const override { return nullptr; }
     static void Draw(void* opaque, uint32_t width, uint32_t height) {
         auto& self = *static_cast<Preview*>(opaque);
+        const auto baseWidth = self.scene.BaseWidth(), baseHeight = self.scene.BaseHeight();
+        if (!self.scene.SourceExists() || baseWidth <= 0 || baseHeight <= 0) return;
         const float scale = std::min(static_cast<float>(width) / self.canvasWidth, static_cast<float>(height) / self.canvasHeight);
         const int w = static_cast<int>(self.canvasWidth * scale), h = static_cast<int>(self.canvasHeight * scale);
         gs_viewport_push(); gs_projection_push();
         gs_set_viewport((static_cast<int>(width) - w) / 2, (static_cast<int>(height) - h) / 2, w, h);
-        gs_ortho(0, static_cast<float>(self.canvasWidth), 0, static_cast<float>(self.canvasHeight), -100, 100);
+        gs_ortho(0, static_cast<float>(baseWidth), 0, static_cast<float>(baseHeight), -100, 100);
         self.scene.Render();
         gs_projection_pop(); gs_viewport_pop();
     }
@@ -145,6 +182,20 @@ public:
         gs_init_data data{};
 #ifdef _WIN32
         data.window.hwnd = reinterpret_cast<void*>(winId());
+#elif defined(__APPLE__)
+        data.window.view = reinterpret_cast<decltype(data.window.view)>(winId());
+#else
+        if (obs_get_nix_platform() == OBS_NIX_PLATFORM_X11_EGL) {
+            data.window.id = static_cast<uint32_t>(winId()); data.window.display = obs_get_nix_platform_display();
+        } else if (obs_get_nix_platform() == OBS_NIX_PLATFORM_WAYLAND) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+            data.window.display = reinterpret_cast<void*>(winId());
+#else
+            auto native = QGuiApplication::platformNativeInterface();
+            data.window.display = native ? native->nativeResourceForWindow("surface", windowHandle()) : nullptr;
+            if (!data.window.display) return;
+#endif
+        } else return;
 #endif
         data.cx = static_cast<uint32_t>(width() * devicePixelRatioF());
         data.cy = static_cast<uint32_t>(height() * devicePixelRatioF());

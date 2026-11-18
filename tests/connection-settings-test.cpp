@@ -753,6 +753,55 @@ static void CheckDualLayout(const QString& screenshotDir)
     Check(!(combo("tiktokLayout")->model()->flags(combo("tiktokLayout")->model()->index(1, 0)) & Qt::ItemIsEnabled), "Mobile screen capture cannot enable dual despite account access");
 }
 
+static void CheckCanvasFollowing()
+{
+    DualUiCatalog catalog{{{"scene", "Fixed scene"}}, {{"test_h264", "H.264"}}, {{"ffmpeg_aac", "AAC"}}};
+    catalog.liveCanvases = {{"main-canvas", "OBS main", 1920, 1080}, {"vertical-canvas", "Aitum Vertical", 1080, 1920}};
+    DualLayoutWidget widget(nullptr, [&] { return catalog; });
+    widget.SetAccess(true);
+    auto select = [&](const char* name, const QString& id) {
+        auto box = widget.findChild<QComboBox*>(name);
+        const auto index = box->findData(id);
+        Check(index >= 0, "Canvas/scene entry exists");
+        box->setCurrentIndex(index);
+        QMetaObject::invokeMethod(box, "activated", Qt::DirectConnection, Q_ARG(int, index));
+    };
+    widget.findChild<QComboBox*>("tiktokLayout")->setCurrentIndex(1);
+    auto portrait = widget.findChild<QComboBox*>("portraitScene");
+    Check(portrait->findData("canvas:main-canvas") == 1 && portrait->findData("canvas:vertical-canvas") == 2
+        && portrait->findData("scene") == 3, "Live canvas entries appear before fixed scenes");
+    select("portraitScene", "canvas:vertical-canvas"); select("landscapeScene", "canvas:main-canvas");
+    auto width = widget.findChild<QSpinBox*>("portraitWidth"), height = widget.findChild<QSpinBox*>("portraitHeight");
+    Check(width->value() == 1080 && height->value() == 1920 && !width->isEnabled() && !height->isEnabled()
+        && !widget.findChild<QComboBox*>("portraitFit")->isEnabled(), "Canvas dimensions and framing are locked");
+    OutputTargetConfig target; target.id = "canvas-test"; target.connectionMethod = ConnectionMethod::TikTokLiveStudio;
+    widget.Save(target.dualLayout);
+    Check(target.dualLayout.portrait.followCanvas && target.dualLayout.portrait.canvasUuid == "vertical-canvas"
+        && target.dualLayout.portrait.canvasName == "Aitum Vertical" && target.dualLayout.portrait.sceneUuid.empty()
+        && !target.dualLayout.portrait.crop && !ValidateDualLayout(target) && widget.Validate(target), "Valid followed canvases save and validate");
+    MultiOutputConfig config; config.targets.push_back(std::make_shared<OutputTargetConfig>(target));
+    auto copy = DeserializeMultiOutputConfig(SerializeMultiOutputConfig(config));
+    Check(copy && copy->targets.front()->dualLayout.portrait.followCanvas
+        && copy->targets.front()->dualLayout.portrait.canvasUuid == "vertical-canvas", "Following mode survives configuration roundtrip");
+    widget.Load(copy->targets.front()->dualLayout);
+    Check(portrait->currentData() == "canvas:vertical-canvas" && width->value() == 1080 && !width->isEnabled(), "Following selection reloads locked");
+    select("portraitScene", "scene"); widget.Save(target.dualLayout);
+    Check(!target.dualLayout.portrait.followCanvas && target.dualLayout.portrait.canvasUuid.empty()
+        && target.dualLayout.portrait.sceneUuid == "scene" && width->isEnabled()
+        && widget.findChild<QComboBox*>("portraitFit")->isEnabled(), "Switching to a fixed scene restores framing and editable dimensions");
+    select("portraitScene", "canvas:main-canvas"); widget.Save(target.dualLayout);
+    Check(ValidateDualLayout(target) != nullptr && !widget.Validate(target), "Landscape main canvas cannot feed the portrait side");
+    select("portraitScene", "canvas:vertical-canvas");
+    catalog.liveCanvases.removeLast(); widget.findChild<QPushButton*>("refreshDualSources")->click();
+    widget.Save(target.dualLayout);
+    Check(portrait->currentData() == "canvas:vertical-canvas" && target.dualLayout.portrait.canvasName == "Aitum Vertical"
+        && !widget.Validate(target), "A removed canvas remains selected, preserves its name and blocks Save");
+    widget.Load(target.dualLayout); widget.Save(target.dualLayout);
+    Check(target.dualLayout.portrait.canvasName == "Aitum Vertical", "Missing canvas name survives reload without accumulating labels");
+    DualLayoutWidget primary(nullptr, [&] { return catalog; }); primary.SetAccess(true); primary.SetNativeCanvasMode(true);
+    Check(primary.findChild<QComboBox*>("portraitScene")->findData("canvas:main-canvas") < 0, "Primary Settings Stream offers only its existing scene inputs");
+}
+
 static void CheckSingleSceneDualSetup()
 {
     DualUiCatalog catalog{{{"input", "scene"}}, {{"test_h264", "H.264"}}, {{"ffmpeg_aac", "AAC"}}};
@@ -890,6 +939,7 @@ int main(int argc, char** argv)
         CheckQuotaMeter(argc > 2 ? QString::fromLocal8Bit(argv[2]) : QString());
         CheckDualLayout(argc > 2 ? QString::fromLocal8Bit(argv[2]) : QString());
         CheckSingleSceneDualSetup();
+        CheckCanvasFollowing();
         CheckAccounts();
         CheckAutomaticAndroidProfile();
         CheckCategories();

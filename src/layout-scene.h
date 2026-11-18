@@ -20,10 +20,16 @@ public:
     video_t* Video() const;
     void Render() const;
     bool SourceExists() const;
+    const char* AvailabilityError() const;
+    int BaseWidth() const;
+    int BaseHeight() const;
+    bool FollowsCanvas() const { return followsCanvas_; }
 private:
     obs_canvas_t* canvas_ = nullptr;
     obs_scene_t* wrapper_ = nullptr;
     obs_source_t* source_ = nullptr;
     bool borrowedCanvas_ = false;
+    bool followsCanvas_ = false;
+    uint32_t outputWidth_ = 0, outputHeight_ = 0;
 };
 void ShowLayoutPreview(const LayoutVideoConfig& config, QWidget* parent);

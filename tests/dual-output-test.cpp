@@ -148,9 +148,13 @@ static void RegisterCaptureCodecs() {
 struct Transport : QObject {
     obs_output_t* output;
     int layout;
+    std::atomic_bool stopping{false};
     explicit Transport(obs_output_t* o) : output(o), layout(QString(obs_output_get_name(o)).contains("portrait") ? 0 : 1) { ++outputCount; }
     ~Transport() { --outputCount; }
 };
+static int stopDelayMs = 0;
+static std::atomic_int packetsDuringStop{0}, signedDuringStop{0};
+static std::atomic_int transportStarts{0};
 static void RegisterTransport() {
     obs_output_info output{}; output.id = "rtmp_output";
     output.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE;
@@ -158,6 +162,7 @@ static void RegisterTransport() {
     output.create = [](obs_data_t*, obs_output_t* o) -> void* { return new Transport(o); };
     output.destroy = [](void* p) { delete static_cast<Transport*>(p); };
     output.start = [](void* p) {
+        ++transportStarts;
         auto& t = *static_cast<Transport*>(p);
         if (t.layout == 1 && mode == Mode::RejectLandscape) return false;
         if (t.layout == 1 && mode == Mode::WaitLandscape) return true;
@@ -167,7 +172,11 @@ static void RegisterTransport() {
             QTimer::singleShot(350, &t, [&t] { obs_output_set_last_error(t.output, "fixture terminal failure"); obs_output_signal_stop(t.output, OBS_OUTPUT_ERROR); });
         return ok;
     };
-    output.stop = [](void* p, uint64_t) { obs_output_signal_stop(static_cast<Transport*>(p)->output, OBS_OUTPUT_SUCCESS); };
+    output.stop = [](void* p, uint64_t) {
+        auto& transport = *static_cast<Transport*>(p); transport.stopping = true;
+        if (stopDelayMs) QTimer::singleShot(stopDelayMs, &transport, [&transport] { obs_output_signal_stop(transport.output, OBS_OUTPUT_SUCCESS); });
+        else obs_output_signal_stop(transport.output, OBS_OUTPUT_SUCCESS);
+    };
     output.encoded_packet = [](void* p, encoder_packet* packet) {
         if (!packet) return;
         const auto& t = *static_cast<Transport*>(p); auto& s = stats[t.layout];
@@ -175,6 +184,10 @@ static void RegisterTransport() {
         else {
             ++s.videos;
             const auto data = QByteArray::fromRawData(reinterpret_cast<const char*>(packet->data), static_cast<qsizetype>(packet->size));
+            if (t.stopping) {
+                ++packetsDuringStop;
+                if (data.contains("\"signResult\":")) ++signedDuringStop;
+            }
             if (data.contains(t.layout == 0 ? "\"push_video_height\":320,\"push_video_width\":180" : "\"push_video_height\":180,\"push_video_width\":320")) s.signedSize = true;
             if (data.contains("\"sei_index\":0,")) s.firstIndex = true;
         }
@@ -191,6 +204,7 @@ static void RegisterTransport() {
 }
 
 struct Color { vec4 color; };
+struct TestTransition { obs_source_t* source; gs_effect_t* effect; };
 static void RegisterSources() {
     obs_source_info source{}; source.id = "test_color"; source.type = OBS_SOURCE_TYPE_INPUT;
     source.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW; source.get_name = Name;
@@ -209,6 +223,27 @@ static void RegisterSources() {
     audio.output_flags = OBS_SOURCE_AUDIO; audio.get_name = Name;
     audio.create = [](obs_data_t*, obs_source_t* s) -> void* { return s; }; audio.destroy = [](void*) {};
     obs_register_source(&audio);
+    obs_source_info fade{}; fade.id = "test_fade"; fade.type = OBS_SOURCE_TYPE_TRANSITION;
+    fade.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW; fade.get_name = Name;
+    fade.create = [](obs_data_t*, obs_source_t* source) -> void* {
+        const auto path = QFileInfo(QString::fromUtf8(__FILE__)).dir().absoluteFilePath("../.deps/obs-studio-32.2.1/plugins/obs-transitions/data/fade_transition.effect").toUtf8();
+        obs_enter_graphics(); auto effect = gs_effect_create_from_file(path.constData(), nullptr); obs_leave_graphics();
+        return effect ? new TestTransition{source, effect} : nullptr;
+    };
+    fade.destroy = [](void* p) { auto data = static_cast<TestTransition*>(p); obs_enter_graphics(); gs_effect_destroy(data->effect); obs_leave_graphics(); delete data; };
+    fade.video_render = [](void* p, gs_effect_t*) {
+        auto data = static_cast<TestTransition*>(p);
+        obs_transition_video_render(data->source, [](void* p, gs_texture_t* a, gs_texture_t* b, float time, uint32_t width, uint32_t height) {
+            auto data = static_cast<TestTransition*>(p);
+            auto effect = data->effect;
+            gs_effect_set_texture(gs_effect_get_param_by_name(effect, "tex_a"), a);
+            gs_effect_set_texture(gs_effect_get_param_by_name(effect, "tex_b"), b);
+            gs_effect_set_float(gs_effect_get_param_by_name(effect, "fade_val"), time);
+            while (gs_effect_loop(effect, "Fade")) gs_draw_sprite(nullptr, 0, width, height);
+        });
+    };
+    fade.audio_render = [](void*, uint64_t*, obs_source_audio_mix*, uint32_t, size_t, size_t) { return false; };
+    obs_register_source(&fade);
 }
 
 static void InstallHttpFixture() {
@@ -1087,6 +1122,111 @@ static void SingleSceneEditorFixture() {
     std::cout << "PASS: single-output Aitum canvas selector, UUID selection and missing-scene preservation\n";
 }
 
+static void CanvasFollowingFixture(const QString& cookiePath) {
+    OBSCanvasAutoRelease main = obs_get_main_canvas();
+    OBSSourceAutoRelease previous = obs_canvas_get_channel(main, 0);
+    obs_video_info info{}; Check(obs_get_video_info(&info), "Main canvas video");
+    info.base_width = 360; info.base_height = 640; info.output_width = 180; info.output_height = 320;
+    OBSCanvasAutoRelease portraitCanvas = obs_canvas_create("Followed portrait", &info, ACTIVATE | SCENE_REF);
+    Check(bool(portraitCanvas), "Native followed canvas");
+    OBSSceneAutoRelease mainRed = obs_canvas_scene_create(main, "Follow main red");
+    OBSSceneAutoRelease mainGreen = obs_canvas_scene_create(main, "Follow main green");
+    OBSSceneAutoRelease portraitRed = obs_canvas_scene_create(portraitCanvas, "Follow portrait red");
+    OBSSceneAutoRelease portraitGreen = obs_canvas_scene_create(portraitCanvas, "Follow portrait green");
+    OBSDataAutoRelease settings = obs_data_create();
+    obs_data_set_int(settings, "color", 0xff0000ff);
+    OBSSourceAutoRelease red = obs_source_create_private("test_color", "Follow red", settings);
+    obs_data_set_int(settings, "color", 0xff00ff00);
+    OBSSourceAutoRelease green = obs_source_create_private("test_color", "Follow green", settings);
+    obs_scene_add(mainRed, red); obs_scene_add(mainGreen, green);
+    vec2 scale{360.f / 320, 640.f / 180};
+    obs_sceneitem_set_scale(obs_scene_add(portraitRed, red), &scale);
+    obs_sceneitem_set_scale(obs_scene_add(portraitGreen, green), &scale);
+    OBSSourceAutoRelease mainTransition = obs_source_create("test_fade", "Main fade", nullptr, nullptr);
+    OBSSourceAutoRelease portraitTransition = obs_source_create("test_fade", "Portrait fade", nullptr, nullptr);
+    Check(mainTransition && portraitTransition, "Real OBS transition sources");
+    obs_transition_set_size(mainTransition, 320, 180); obs_transition_set_size(portraitTransition, 360, 640);
+    obs_transition_set(mainTransition, obs_scene_get_source(mainRed));
+    obs_transition_set(portraitTransition, obs_scene_get_source(portraitRed));
+    obs_canvas_set_channel(main, 0, mainTransition); obs_canvas_set_channel(portraitCanvas, 0, portraitTransition);
+    OutputTargetConfig config; config.id = "canvas-follow"; config.connectionMethod = ConnectionMethod::TikTokLiveStudio;
+    config.rapidApiKey = "fixture"; config.cookieFilePath = cookiePath.toStdString(); config.dualLayout.enabled = true;
+    config.tiktokDeviceProfiles = {{"pc", {{"device_id", "11"}, {"install_id", "12"}}}};
+    config.dualLayout.sharedAudio.encoderId = "test_aac"; config.dualLayout.sharedAudio.mixer = 4;
+    for (auto video : {&config.dualLayout.portrait, &config.dualLayout.landscape}) { video->followCanvas = true; video->encoderId = "test_h264"; }
+    config.dualLayout.portrait.canvasUuid = obs_canvas_get_uuid(portraitCanvas); config.dualLayout.portrait.width = 180; config.dualLayout.portrait.height = 320;
+    config.dualLayout.landscape.canvasUuid = obs_canvas_get_uuid(main); config.dualLayout.landscape.width = 320; config.dualLayout.landscape.height = 180;
+    {
+        LayoutScene preview; QString error;
+        Check(preview.CreatePreview(config.dualLayout.portrait, &error) && preview.Video() == obs_canvas_get_video(portraitCanvas)
+            && preview.BaseWidth() == 360 && preview.BaseHeight() == 640, "Live preview borrows canvas and uses base dimensions when output is downscaled");
+        OBSSourceAutoRelease channel = obs_canvas_get_channel(portraitCanvas, 0);
+        Check(channel == portraitTransition, "Preview never changes the canvas program source");
+    }
+    for (auto& sample : stats) sample.Reset();
+    {
+        DualOutputSession session;
+        if (!session.Start(config, {})) throw std::runtime_error("Both sides follow native canvases: " + session.Error().toStdString());
+        Until([&] { return session.Live() && stats[0].signedSize && stats[1].signedSize && stats[0].center > 50 && stats[1].center > 50; });
+        Check(stats[0].center < 90 && stats[1].center < 90 && stats[0].corner > 50, "Both feeds begin with the red program scenes");
+        Check(obs_transition_start(mainTransition, OBS_TRANSITION_MODE_AUTO, 1200, obs_scene_get_source(mainGreen))
+            && obs_transition_start(portraitTransition, OBS_TRANSITION_MODE_AUTO, 1200, obs_scene_get_source(portraitGreen)), "Start real OBS transitions");
+        Until([] { return stats[0].center > 90 && stats[0].center < 150 && stats[1].center > 90 && stats[1].center < 150; });
+        Until([] { return stats[0].center > 150 && stats[1].center > 150; });
+        session.Stop(); Until([&] { return !session.Running(); });
+        Check(!obs_canvas_removed(portraitCanvas) && !obs_canvas_removed(main), "Stopping leaves both borrowed canvases intact");
+    }
+    config.dualLayout.portrait.followCanvas = false; config.dualLayout.portrait.canvasUuid.clear();
+    config.dualLayout.portrait.sceneUuid = obs_source_get_uuid(obs_scene_get_source(portraitRed));
+    for (auto& sample : stats) sample.Reset();
+    {
+        auto session = std::make_unique<DualOutputSession>(); Check(session->Start(config, {}), "Fixed portrait scene and live main canvas can be mixed");
+        Until([&] { return session->Live() && stats[0].center > 50 && stats[1].center > 150; });
+        obs_transition_set(mainTransition, obs_scene_get_source(mainRed));
+        Until([] { return stats[0].center > 50 && stats[0].center < 90 && stats[1].center > 50 && stats[1].center < 90; });
+        // Metadata is periodic; wait beyond its largest interval so a fresh
+        // signed payload must be emitted after shutdown is requested.
+        stopDelayMs = 1250; packetsDuringStop = 0; signedDuringStop = 0;
+        session.reset();
+        stopDelayMs = 0;
+        Check(packetsDuringStop > 0 && signedDuringStop > 0, "Destructor keeps periodic signing attached during delayed output stop");
+    }
+    config.dualLayout.portrait.followCanvas = true; config.dualLayout.portrait.sceneUuid.clear();
+    config.dualLayout.portrait.canvasUuid = obs_canvas_get_uuid(portraitCanvas);
+    {
+        DualOutputSession session; Check(session.Start(config, {}), "Start before reconnect cancellation");
+        Until([&] { return session.Live(); });
+        OBSOutputAutoRelease output = obs_get_output_by_name("canvas-follow-landscape");
+        obs_output_signal_stop(output, OBS_OUTPUT_DISCONNECTED);
+        Until([&] { return !session.Live(); });
+        const int starts = transportStarts;
+        session.Stop(); Until([&] { return !session.Running(); });
+        QElapsedTimer wait; wait.start();
+        while (wait.elapsed() < 2250) { QApplication::processEvents(); QThread::msleep(5); }
+        Check(transportStarts == starts && !obs_output_active(output), "Stop cancels the pending reconnect and cannot restart either feed");
+    }
+    {
+        mode = Mode::RejectLandscape; stopDelayMs = 1250; packetsDuringStop = 0; signedDuringStop = 0;
+        DualOutputSession session;
+        Check(!session.Start(config, {}) && !session.Running(), "Partial startup failure waits for accepted feed teardown");
+        mode = Mode::Normal; stopDelayMs = 0;
+        Check(packetsDuringStop > 0 && signedDuringStop > 0, "Partial startup cleanup preserves signing until the running feed stops");
+    }
+    {
+        DualOutputSession session; Check(session.Start(config, {}), "Start before native canvas removal");
+        Until([&] { return session.Live(); });
+        obs_canvas_remove(portraitCanvas);
+        Until([&] { return !session.Running(); });
+        Check(session.Error().contains("Canvas") || session.Error().contains("canvas"), "Removing followed canvas stops both feeds with a canvas error");
+    }
+    {
+        DualOutputSession session; Check(!session.Start(config, {}), "A missing followed canvas blocks startup");
+    }
+    obs_canvas_set_channel(main, 0, previous); obs_canvas_set_channel(portraitCanvas, 0, nullptr);
+    for (auto scene : {mainRed.Get(), mainGreen.Get(), portraitRed.Get(), portraitGreen.Get()}) obs_canvas_scene_remove(scene);
+    std::cout << "PASS: native canvas switches, transitions, mixed inputs, live preview, removal and signed stop teardown\n";
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     try {
@@ -1167,6 +1307,7 @@ int main(int argc, char** argv) {
             }
             PrimaryFixtures(cookie.fileName(), portrait, landscape, argc > 2 ? QString::fromUtf8(argv[2]) : QString());
             RunFixtures(cookie.fileName(), portrait, landscape);
+            CanvasFollowingFixture(cookie.fileName());
             samples.request_stop(); samples.join();
             for (int i = 0; i < 3; ++i) obs_set_output_source(i, nullptr);
             // The main canvas owns scene references in OBS 32.2. Remove our

@@ -24,7 +24,8 @@ static nlohmann::json SaveLayoutAudio(const LayoutAudioConfig& c) {
 static nlohmann::json SaveLayoutVideo(const LayoutVideoConfig& c) {
     return {{"scene-uuid", c.sceneUuid}, {"scene-name", c.sceneName}, {"encoder", c.encoderId},
         {"width", c.width}, {"height", c.height}, {"bitrate", c.bitrate}, {"crop", c.crop}, {"audio", SaveLayoutAudio(c.audio)},
-        {"fps-divisor", c.fpsDivisor}, {"param", c.encoderParams}, {"canvas-uuid", c.canvasUuid}};
+        {"fps-divisor", c.fpsDivisor}, {"param", c.encoderParams}, {"canvas-uuid", c.canvasUuid},
+        {"follow-canvas", c.followCanvas}, {"canvas-name", c.canvasName}};
 }
 static void LoadLayoutAudio(nlohmann::json j, LayoutAudioConfig& c) {
     c.encoderId = GetJsonField<std::string>(j, "encoder").value_or(c.encoderId);
@@ -35,6 +36,8 @@ static void LoadLayoutAudio(nlohmann::json j, LayoutAudioConfig& c) {
 }
 static void LoadLayoutVideo(nlohmann::json j, LayoutVideoConfig& c) {
     c.canvasUuid = GetJsonField<std::string>(j, "canvas-uuid").value_or("");
+    c.followCanvas = GetJsonField<bool>(j, "follow-canvas").value_or(false);
+    c.canvasName = GetJsonField<std::string>(j, "canvas-name").value_or("");
     c.sceneUuid = GetJsonField<std::string>(j, "scene-uuid").value_or("");
     c.sceneName = GetJsonField<std::string>(j, "scene-name").value_or("");
     c.encoderId = GetJsonField<std::string>(j, "encoder").value_or(c.encoderId);
