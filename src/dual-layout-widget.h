@@ -13,10 +13,12 @@ class QLabel;
 
 struct DualChoice { QString id, name, canvasId; };
 struct DualGeneratedLayout { QString sceneId, canvasId, inputId, inputName; };
+struct DualCanvasChoice { QString id, name; int width = 0, height = 0; };
 struct DualUiCatalog {
     QVector<DualChoice> scenes, videoEncoders, audioEncoders, canvases;
     QVector<DualGeneratedLayout> generated;
     QString currentSceneId;
+    QVector<DualCanvasChoice> liveCanvases;
 };
 DualUiCatalog ReadDualUiCatalog();
 const char* ValidateDualLayout(const OutputTargetConfig& config);

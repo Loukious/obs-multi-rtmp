@@ -40,6 +40,9 @@ endif()
 if(ENABLE_QT)
   find_package(Qt6 COMPONENTS Widgets Core)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
+  if(UNIX AND NOT APPLE AND Qt6_VERSION VERSION_LESS 6.9)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::GuiPrivate)
+  endif()
   target_compile_options(
     ${CMAKE_PROJECT_NAME}
     PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
@@ -76,6 +79,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/tiktok-topic-widget.cpp
   src/dual-layout-widget.cpp
   src/layout-scene.cpp
+  src/canvas-source.h
   src/dual-output-session.cpp
   src/primary-canvas.cpp
   src/primary-output.cpp
