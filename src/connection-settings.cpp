@@ -153,7 +153,15 @@ ConnectionSettingsWidget::ConnectionSettingsWidget(QWidget* customSettings, QWid
     orientationLabel_ = new QLabel(obs_module_text("Connection.Orientation"), mobileOptions_);
     mobileOptions->addRow(orientationLabel_, orientation_);
     liveStudio->addRow(mobileOptions_);
-    liveStudio->addRow(obs_module_text("Connection.RapidApiKey"), PasswordField(rapidApiKey_, "rapidApiKey", liveStudioSettings_));
+    auto rapidApiRow = PasswordField(rapidApiKey_, "rapidApiKey", liveStudioSettings_);
+    auto getApiKey = new QPushButton(obs_module_text("Connection.GetApiKey"), rapidApiRow);
+    getApiKey->setObjectName("getRapidApiKey");
+    getApiKey->setAutoDefault(false);
+    QObject::connect(getApiKey, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(QUrl("https://github.com/Loukious/obs-multi-rtmp/wiki/Get-a-RapidAPI-key"));
+    });
+    static_cast<QHBoxLayout*>(rapidApiRow->layout())->addWidget(getApiKey);
+    liveStudio->addRow(obs_module_text("Connection.RapidApiKey"), rapidApiRow);
     auto quota = new RapidApiQuotaWidget(liveStudioSettings_);
     liveStudio->addRow(quota);
     QObject::connect(rapidApiKey_, &QLineEdit::textChanged, quota, &RapidApiQuotaWidget::SetApiKey);
