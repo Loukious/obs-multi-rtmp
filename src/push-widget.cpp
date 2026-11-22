@@ -345,6 +345,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             && left.fpsDenumerator == right.fpsDenumerator
             && left.encoderParams == right.encoderParams
             && left.outputScene == right.outputScene
+            && left.outputSceneUuid == right.outputSceneUuid
             && left.resolution == right.resolution;
     }
 
@@ -372,11 +373,11 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             return;
 
         auto videoConfig = newConfig.FindVideoConfig(*config_->videoConfig);
-        if (!videoConfig || !videoConfig->outputScene)
+        if (!videoConfig || (!videoConfig->outputScene && !videoConfig->outputSceneUuid))
             return;
 
-        const auto& sceneName = *videoConfig->outputScene;
-        OBSSourceAutoRelease next = obs_get_source_by_name(sceneName.c_str());
+        const auto sceneName = videoConfig->outputScene.value_or(videoConfig->outputSceneUuid.value_or(""));
+        OBSSourceAutoRelease next = ResolveConfiguredScene(*videoConfig);
         if (!next) {
             blog(LOG_WARNING, TAG "Output scene '%s' is not found; keeping the current scene", sceneName.c_str());
             return;
@@ -568,8 +569,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             SetMsg(dualSession_->Status());
             btn_->setText(obs_module_text(running ? "Status.Stop" : "Btn.Start"));
             btn_->setEnabled(true);
-            remove_btn_->setEnabled(!running);
-            edit_btn_->setEnabled(!running);
+            isBusy_ = running;
             lastErrorCode_ = dualSession_->Error().isEmpty() ? 0 : -1;
             if (!running) timer_->stop();
             UpdateStatusDot(!running);
@@ -1074,7 +1074,7 @@ public:
 
     bool IsBusy() override
     {
-        return isBusy_;
+        return isBusy_ || isStarting_ || (dualSession_ && dualSession_->Running());
     }
 
     const std::string& GetTargetId() const override

@@ -12,6 +12,7 @@ public:
     virtual ~EditTargetPanel() {}
     // Writes the current widget values into the working target config.
     virtual void SaveConfig() = 0;
+    virtual bool Validate() = 0;
 };
 
 EditTargetPanel* createEditTargetPanel(

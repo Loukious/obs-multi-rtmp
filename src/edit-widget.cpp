@@ -104,6 +104,21 @@ public:
         return CalculateTabSize([](QWidget* widget) { return widget->minimumSizeHint(); });
     }
 
+    bool hasHeightForWidth() const override {
+        return currentWidget() && currentWidget()->hasHeightForWidth();
+    }
+
+    int heightForWidth(int width) const override {
+        const int frame = style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, this) * 2;
+        const int barWidth = tabPosition() == West || tabPosition() == East ? tabBar()->sizeHint().width() : 0;
+        return CalculateTabSize([=](QWidget* widget) {
+            auto hint = widget->sizeHint();
+            if (widget->hasHeightForWidth())
+                hint.setHeight(widget->heightForWidth((std::max)(0, width - frame - barWidth)));
+            return hint;
+        }).height();
+    }
+
 private:
     template<class T>
     QSize CalculateTabSize(T getWidgetSize) const {
@@ -258,6 +273,7 @@ class EditTargetPanelImpl: public EditTargetPanel
     const GlobalEditSnapshot* snapshot_ = nullptr;
     OutputTargetConfigPtr config_;
     std::function<void()> onContentSizeChanged_;
+    QTabWidget* outputSettingsTabs_ = nullptr;
     QGroupBox *singleVideo_ = nullptr, *singleAudio_ = nullptr;
     QWidget *videoPage_ = nullptr, *audioPage_ = nullptr;
     QGroupBox* videoGroup_ = nullptr;
@@ -398,12 +414,21 @@ class EditTargetPanelImpl: public EditTargetPanel
     }
 
     void NotifyContentSizeChanged() {
+        if (outputSettingsTabs_) {
+            for (int i = 0; i < outputSettingsTabs_->count(); ++i) {
+                auto page = outputSettingsTabs_->widget(i);
+                const auto policy = i == outputSettingsTabs_->currentIndex() ? QSizePolicy::Preferred : QSizePolicy::Ignored;
+                page->setSizePolicy(policy, policy);
+            }
+            outputSettingsTabs_->updateGeometry();
+        }
         if (onContentSizeChanged_)
             onContentSizeChanged_();
     }
 
     QTabWidget* CreateOutputSettingsWidget(QWidget* parent) {
         auto tab = new ContentSizeTabWidget(parent);
+        outputSettingsTabs_ = tab;
 
         // service
         {
@@ -929,6 +954,11 @@ public:
 
         venc_->setEnabled(!targetIsActive && !videoConfigIsActive);
         aenc_->setEnabled(!targetIsActive && !audioConfigIsActive);
+        // Dual encoders belong to this target and are not updated by the
+        // shared-encoder reconciliation used for ordinary outputs.
+        connectionSettings_->LayoutSettings()->setEnabled(!targetIsActive);
+        connectionSettings_->LayoutSettings()->VideoSettings()->setEnabled(!targetIsActive);
+        connectionSettings_->LayoutSettings()->AudioSettings()->setEnabled(!targetIsActive);
     }
 
     std::vector<std::string> GetEncoderShareTargets(bool isAudio) {
@@ -1023,6 +1053,14 @@ public:
             audio_track->output_track = 1;
             it->audioTracks.push_back(audio_track);
         }
+    }
+
+    bool Validate() override
+    {
+        const bool valid = connectionSettings_->Validate();
+        if (!valid)
+            NotifyContentSizeChanged();
+        return valid;
     }
 
     void SaveConfig() override
@@ -1280,6 +1318,7 @@ class EditOutputWidgetImpl: public EditOutputWidget
     OutputTargetConfigPtr config_ = nullptr;
 
     bool resizeToContentPending_ = false;
+    bool initialSizeApplied_ = false;
 
     void RefreshContentGeometry() {
         layout()->activate();
@@ -1304,7 +1343,10 @@ class EditOutputWidgetImpl: public EditOutputWidget
     }
 
     void ApplyAutoDialogSize() {
-        auto targetSize = sizeHint();
+        if (initialSizeApplied_ || !isVisible())
+            return;
+        initialSizeApplied_ = true;
+        auto targetSize = sizeHint().expandedTo(QSize(980, 720));
         if (!targetSize.isValid())
             return;
 
@@ -1351,8 +1393,10 @@ public:
         config_ = std::make_shared<OutputTargetConfig>(*found);
 
         setWindowTitle(obs_module_text("StreamingSettings"));
+        setSizeGripEnabled(true);
 
         scroll_ = new ContentSizeScrollArea(this);
+        scroll_->setObjectName("outputEditorScroll");
         scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAsNeeded);
         scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarPolicy::ScrollBarAsNeeded);
         scroll_->setSizePolicy(QSizePolicy::Policy::Preferred, QSizePolicy::Policy::Preferred);
@@ -1367,9 +1411,12 @@ public:
         panel_ = createEditTargetPanel(global, config_, [this]() { ScheduleResizeToContent(); }, container_);
         layout->addWidget(panel_);
 
+        auto okbtn = new QPushButton(obs_module_text("OK"), this);
+        okbtn->setObjectName("saveOutputSettings");
         {
-            auto okbtn = new QPushButton(obs_module_text("OK"), container_);
             QObject::connect(okbtn, &QPushButton::clicked, [this]() {
+                if (!panel_->Validate())
+                    return;
                 panel_->SaveConfig();
                 auto& global = GlobalMultiOutputConfig();
                 auto it = global.FindTarget(config_->id);
@@ -1378,17 +1425,17 @@ public:
                 }
                 done(DialogCode::Accepted);
             });
-            layout->addWidget(okbtn);
         }
 
-        layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+        layout->setSizeConstraint(QLayout::SetMinimumSize);
 
         scroll_->setWidget(container_);
-        scroll_->setWidgetResizable(false);
+        scroll_->setWidgetResizable(true);
 
         auto fullLayout = new QGridLayout(this);
         fullLayout->setContentsMargins(0, 0, 0, 0);
         fullLayout->addWidget(scroll_, 0, 0);
+        fullLayout->addWidget(okbtn, 1, 0);
         fullLayout->setRowStretch(0, 1);
         fullLayout->setColumnStretch(0, 1);
     }

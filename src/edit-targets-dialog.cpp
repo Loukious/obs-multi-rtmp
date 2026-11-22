@@ -412,6 +412,7 @@ public:
         leftLayout->addLayout(buttonLayout);
 
         list_ = new QListWidget(left);
+        list_->setObjectName("targetList");
         list_->setSelectionMode(QAbstractItemView::SingleSelection);
         leftLayout->addWidget(list_, 1);
 
@@ -436,10 +437,21 @@ public:
         RebuildTargets();
 
         auto okButton = new QPushButton(obs_module_text("OK"), this);
+        okButton->setObjectName("saveTargets");
         auto cancelButton = new QPushButton(obs_module_text("Cancel"), this);
 
         QObject::connect(okButton, &QPushButton::clicked, [this]() {
             CommitCurrent();
+            for (int row = 0; row < (int)targets_.size(); ++row) {
+                // Create unvisited pages too, so imported/native settings
+                // receive the same validation as the selected target.
+                EnsurePage(row);
+                if (!panels_[row]->Validate()) {
+                    list_->setCurrentRow(row);
+                    return;
+                }
+                panels_[row]->SaveConfig();
+            }
             accept();
         });
         QObject::connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);

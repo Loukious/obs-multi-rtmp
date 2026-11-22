@@ -191,7 +191,8 @@ if(ENABLE_CONNECTION_TESTS)
       src/rapidapi-quota-widget.cpp
       src/primary-canvas.cpp src/primary-output.cpp src/primary-settings.cpp
       src/dual-output-session.cpp src/dual-layout-widget.cpp src/layout-scene.cpp
-      src/edit-widget.cpp src/connection-settings.cpp src/account-info-widget.cpp src/output-config.cpp
+      src/edit-widget.cpp src/edit-targets-dialog.cpp src/push-widget.cpp
+      src/connection-settings.cpp src/account-info-widget.cpp src/output-config.cpp
       src/streamlabs-category-widget.cpp src/tiktok-topic-widget.cpp src/obs-properties-widget.cpp src/protocols.cpp
       src/tiktok-live-session.cpp ${TIKTOK_NATIVE_SOURCES})
     target_include_directories(dual-output-test PRIVATE src dep/nlohmann-json)

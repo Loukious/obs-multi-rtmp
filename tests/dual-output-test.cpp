@@ -6,6 +6,9 @@
 #include "shared-scene-view.h"
 #include "output-scene.h"
 #include "edit-widget.h"
+#include "edit-targets-dialog.h"
+#include "push-widget.h"
+#include "obs-multi-rtmp.h"
 #include "connection-settings.h"
 #include "connection-login.h"
 #include "account-info.h"
@@ -38,6 +41,7 @@
 #include <QJsonObject>
 #include <QPushButton>
 #include <QTabWidget>
+#include <QListWidget>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QSettings>
@@ -70,6 +74,16 @@ static void Until(const std::function<bool()>& condition, int timeout = 5000) {
     QElapsedTimer timer; timer.start();
     while (!condition() && timer.elapsed() < timeout) { QApplication::processEvents(); QThread::msleep(5); }
     Check(condition(), "OBS runtime condition timed out");
+}
+GlobalService& GetGlobalService() {
+    class FixtureUiService final : public GlobalService {
+        bool RunInUIThread(std::function<void()> task) override {
+            QTimer::singleShot(0, QCoreApplication::instance(), std::move(task));
+            return true;
+        }
+    };
+    static FixtureUiService service;
+    return service;
 }
 static QByteArray Json(const QJsonObject& value) { return QJsonDocument(value).toJson(QJsonDocument::Compact); }
 static const char* Name(void*) { return "Local test"; }
@@ -296,6 +310,82 @@ static void AssertReleased() {
     int ephemeral = 0;
     obs_enum_canvases([](void* p, obs_canvas_t* canvas) { if (obs_canvas_get_flags(canvas) & EPHEMERAL) ++*static_cast<int*>(p); return true; }, &ephemeral);
     Check(ephemeral == 0, "Private layout canvases released after stop");
+}
+
+static void GlobalEditorFixture(const QString& cookiePath, obs_scene_t* portrait, obs_scene_t* landscape)
+{
+    MultiOutputConfig config;
+    for (int i = 0; i < 2; ++i) {
+        auto target = std::make_shared<OutputTargetConfig>();
+        target->id = "global-editor-" + std::to_string(i);
+        target->name = target->id;
+        target->connectionMethod = ConnectionMethod::TikTokLiveStudio;
+        target->tiktokTopicId = "6";
+        target->cookieFilePath = cookiePath.toStdString();
+        target->rapidApiKey = i == 0 ? "fixture" : "";
+        config.targets.push_back(target);
+    }
+    const auto original = SerializeMultiOutputConfig(GlobalMultiOutputConfig());
+    std::exception_ptr error;
+    QTimer::singleShot(0, [&] {
+        try {
+            QDialog* dialog = nullptr;
+            for (auto window : QApplication::topLevelWidgets())
+                if (window->findChild<QPushButton*>("saveTargets")) dialog = qobject_cast<QDialog*>(window);
+            Check(dialog != nullptr, "Global editor opens");
+            auto list = dialog->findChild<QListWidget*>("targetList");
+            dialog->findChild<QPushButton*>("saveTargets")->click();
+            Check(dialog->isVisible() && list->currentRow() == 1, "Global save validates an unvisited native target and selects its error");
+            for (auto child : dialog->findChildren<QWidget*>()) {
+                auto panel = dynamic_cast<EditTargetPanel*>(child);
+                if (!panel) continue;
+                auto key = panel->findChild<QLineEdit*>("rapidApiKey");
+                if (key && key->text().isEmpty()) key->setText("fixture");
+            }
+            dialog->findChild<QPushButton*>("saveTargets")->click();
+            Check(!dialog->isVisible(), "Correcting native credentials allows global save");
+        } catch (...) {
+            error = std::current_exception();
+            for (auto window : QApplication::topLevelWidgets())
+                if (auto dialog = qobject_cast<QDialog*>(window); dialog && dialog->isVisible()) dialog->reject();
+        }
+    });
+    auto result = showEditTargetsDialog(SerializeMultiOutputConfig(config), {}, nullptr);
+    if (error) std::rethrow_exception(error);
+    Check(result.has_value() && DeserializeMultiOutputConfig(*result)->targets.back()->rapidApiKey == "fixture",
+        "Global editor returns corrected configuration");
+    Check(SerializeMultiOutputConfig(GlobalMultiOutputConfig()) == original, "Global editor works on an isolated configuration copy");
+
+    auto target = config.targets.front();
+    target->tiktokDeviceProfiles = {{"pc", {{"device_id", "11"}, {"install_id", "12"}}}};
+    target->dualLayout.enabled = true;
+    target->dualLayout.portrait.sceneUuid = obs_source_get_uuid(obs_scene_get_source(portrait));
+    target->dualLayout.landscape.sceneUuid = obs_source_get_uuid(obs_scene_get_source(landscape));
+    target->dualLayout.portrait.encoderId = target->dualLayout.landscape.encoderId = "test_h264";
+    target->dualLayout.portrait.width = target->dualLayout.landscape.height = 180;
+    target->dualLayout.portrait.height = target->dualLayout.landscape.width = 320;
+    target->dualLayout.sharedAudio.encoderId = "test_aac";
+    GlobalEditSnapshot snapshot; snapshot.activeTargetIds.insert(target->id);
+    {
+        std::unique_ptr<EditTargetPanel> panel(createEditTargetPanel(config, target, [] {}, nullptr, &snapshot));
+        Check(!panel->findChild<QComboBox*>("tiktokLayout")->isEnabled() &&
+            !panel->findChild<QWidget*>("dualVideoSettings")->isEnabled() &&
+            !panel->findChild<QWidget*>("dualAudioSettings")->isEnabled(),
+            "Active dual target locks layout mode and reparented encoder controls");
+    }
+    GlobalMultiOutputConfig().targets.push_back(target);
+    {
+        std::unique_ptr<PushWidget> widget(createPushWidget(target->id));
+        widget->StartStreaming();
+        Check(widget->IsRunning() && widget->IsBusy(), "Dock reports dual startup as busy to protect editing and deletion");
+        widget->StopStreaming();
+        Check(widget->IsBusy(), "Dual target remains busy while stop cleanup drains encoders");
+        Until([&] { return !widget->IsBusy(); });
+        Check(!widget->IsRunning(), "Dual target becomes editable after both feeds stop");
+    }
+    GlobalMultiOutputConfig().targets.clear();
+    AssertReleased();
+    std::cout << "PASS: global native validation, active dual layout locks and dock busy lifecycle\n";
 }
 
 static void EditorFixture(const QString& cookiePath, obs_scene_t* portrait, obs_scene_t* landscape, const QString& screenshots)
@@ -1277,6 +1367,7 @@ int main(int argc, char** argv) {
             // Localized screenshots are optional; assertions also support raw
             // translation keys when CTest runs without the locale argument.
             EditorFixture(cookie.fileName(), portrait, landscape, argc > 2 ? QString::fromLocal8Bit(argv[2]) : QString());
+            GlobalEditorFixture(cookie.fileName(), portrait, landscape);
             if (argc > 2) {
                 const auto directory = QString::fromLocal8Bit(argv[2]); QDir().mkpath(directory);
                 for (int layout = 0; layout < 3; ++layout) {

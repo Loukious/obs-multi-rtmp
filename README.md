@@ -37,7 +37,7 @@ To add TikTok as a secondary destination instead:
 
 1. Install the plugin as usual.
 2. Open OBS and go to `Docks` -> `Multiple output`.
-3. Click on `Add new target`.
+3. Click **Edit targets**, then **+** to add a target. Select an existing target in the list to edit it.
 4. In the Service tab, choose **Connect using**:
    - **Custom URL / stream key** (default): enter your server and stream key. Protocol and authentication controls belong to this method.
    - **TikTok — Streamlabs**: enter a required Streamlabs token from [StreamLabsTikTokStreamKeyGenerator](https://github.com/Loukious/StreamLabsTikTokStreamKeyGenerator), then set your title and category.
@@ -68,7 +68,7 @@ LIVE Studio and Mobile follow the original TiktokStreaming app's hostname rules:
 
 Leave both ID fields blank for automatic setup. LIVE Studio registers when starting; Android generates a local hardware/installation profile and registers directly with TikTok before its account check or stream startup. Android registration uses native gzip/ttEncrypt, without a signing API request. The returned IDs, fingerprint and registration metadata appear in the editor and are saved with **OK**; startup also saves the profile, including after a failed attempt so retries reuse the local identity. **Refresh** retries failed Android setup. Manual IDs remain optional, and each client's profile is saved separately. Mobile offers **Camera LIVE** (default) and **Mobile gaming (screen capture)**, with **Portrait** or **Landscape** orientation for screen capture. Mobile uses a TikTok 47.1.4 request profile and requires the signer's Android frame-signature version 2.0 support.
 
-The streaming settings window resizes its contents with the window and keeps the size you choose when changing tabs or receiving account results. Audio dropdowns expand to use available space. The **OK** button stays outside the scrolling settings.
+The streaming settings window resizes its contents with the window and keeps the size you choose when changing tabs or receiving account results. Audio dropdowns expand to use available space. The **OK** button stays outside the scrolling settings. **Edit targets** manages all dock destinations in one window, including import/export and ordering. Targets can be edited while streaming; connection changes take effect on the next start, shared encoder parameters can update live, and active dual-layout settings remain locked until both feeds stop.
 
 LIVE Studio / Mobile requires OBS 32.2 and an H.264 or HEVC encoder. Requests, heartbeats, frame signatures, and video SEI insertion run in native C++ using Qt and libcurl. There is no Python runtime or external FFmpeg process. Existing Streamlabs checkbox settings migrate automatically, and switching methods preserves each method's inputs.
 
